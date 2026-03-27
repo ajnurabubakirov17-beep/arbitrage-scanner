@@ -2,4 +2,3 @@ requests
 aiohttp
 flask
 ccxt
-python-telegram-bot==13.15
