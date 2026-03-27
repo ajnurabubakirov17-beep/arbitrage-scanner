@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8780012882:AAHI92nj-1Punbum_5FSzATDy58UgK4JAX4")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "1071868963")
 
-MIN_PROFIT = 0.3
+MIN_PROFIT = 0.2
 SCAN_INTERVAL = 10
 scanner_active = True
 
@@ -301,7 +301,7 @@ async def get_all_prices():
         tasks = [fetch_exchange(session, name, config) for name, config in EXCHANGES.items()]
         results = await asyncio.gather(*tasks)
         
-        all_prices = {sym: {} for sym in SYMBOLS[:2000]}  # Ограничиваем для скорости
+        all_prices = {sym: {} for sym in SYMBOLS}  # ✅ Все монеты
         for i, name in enumerate(EXCHANGES.keys()):
             for sym, prices in results[i].items():
                 if sym in all_prices:
@@ -350,7 +350,7 @@ def analyze_opportunity(buy_price, sell_price, buy_exchange, sell_exchange, symb
 
 def find_opportunities(all_prices):
     opportunities = []
-    for sym in list(all_prices.keys())[:500]:
+    for sym in list(all_prices.keys()):  # ✅ Все монеты
         prices = all_prices[sym]
         if len(prices) >= 2:
             for buy_ex, buy_data in prices.items():
@@ -432,7 +432,7 @@ async def main_scanner():
                 
                 if opps:
                     logger.info(f"Найдено {len(opps)} спредов!")
-                    for opp in opps[:3]:
+                    for opp in opps[:10]:  # ✅ Отправляет до 10 (или можно убрать [:10] для всех)
                         key = f"{opp['symbol']}_{opp['buy_exchange']}_{opp['sell_exchange']}"
                         now = time.time()
                         if key not in last_alerts or (now - last_alerts.get(key, 0)) > 300:
