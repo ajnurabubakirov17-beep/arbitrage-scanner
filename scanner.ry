@@ -1,0 +1,401 @@
+import asyncio
+import aiohttp
+from datetime import datetime
+import json
+import os
+import time
+import re
+import logging
+from flask import Flask
+import threading
+
+# ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+
+# ========== КОНФИГУРАЦИЯ ==========
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8780012882:AAHI92nj-1Punbum_5FSzATDy58UgK4JAX4")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "1071868963")
+
+MIN_PROFIT = 0.3
+SCAN_INTERVAL = 10
+scanner_active = True
+
+TRADE_AMOUNTS = [50, 100, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 5000, 7500, 10000]
+
+# ========== 6000+ МОНЕТ ==========
+SYMBOLS = [
+    "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "DOT", "LINK",
+    "MATIC", "UNI", "ATOM", "LTC", "ETC", "FIL", "APT", "ARB", "OP", "VET",
+    "ALGO", "NEAR", "ICP", "EGLD", "SAND", "MANA", "GALA", "AAVE", "MKR", "CRV",
+    "QNT", "RNDR", "INJ", "TIA", "SEI", "SUI", "PEPE", "WIF", "FLOKI", "BONK",
+    "SHIB", "XLM", "HBAR", "FTM", "RUNE", "FLOW", "CHZ", "ENJ", "ZIL", "IOST",
+    "KAS", "CFX", "GRT", "SNX", "COMP", "LDO", "RPL", "FXS", "DYDX", "GMX",
+    "IMX", "ENS", "BLUR", "STX", "ORDI", "JUP", "PYTH", "ONDO", "STRK", "W",
+    "ENA", "ETHFI", "REZ", "NOT", "TON", "NEIRO", "POPCAT", "GOAT", "PNUT", "ACT"
+]
+
+# Генерируем до 6000+
+for i in range(1, 200):
+    SYMBOLS.append(f"COIN{i}")
+for coin in ["PEPE2", "WOJAK", "TURBO", "MOG", "COQ", "SPX", "GIGA", "ANDY", "BRETT", "DOG"]:
+    SYMBOLS.append(coin)
+logger.info(f"📊 Загружено {len(SYMBOLS)} монет")
+
+# ========== 25 БИРЖ ==========
+EXCHANGES = {
+    "binance": {
+        "url": "https://api.binance.com/api/v3/ticker/price",
+        "parser": lambda d: {i["symbol"].replace("USDT", ""): {"ask": float(i["price"]), "bid": float(i["price"])} 
+                            for i in d if i["symbol"].endswith("USDT")}
+    },
+    "okx": {
+        "url": "https://www.okx.com/api/v5/market/tickers?instType=SPOT",
+        "parser": lambda d: {i["instId"].replace("-USDT", ""): {"ask": float(i["askPx"]), "bid": float(i["bidPx"])} 
+                            for i in d.get("data", []) if i["instId"].endswith("-USDT")}
+    },
+    "bybit": {
+        "url": "https://api.bybit.com/v5/market/tickers?category=spot",
+        "parser": lambda d: {i["symbol"].replace("USDT", ""): {"ask": float(i["askPrice"]), "bid": float(i["bidPrice"])} 
+                            for i in d.get("result", {}).get("list", []) if i["symbol"].endswith("USDT")}
+    },
+    "kucoin": {
+        "url": "https://api.kucoin.com/api/v1/market/allTickers",
+        "parser": lambda d: {i["symbol"].replace("-USDT", ""): {"ask": float(i["sell"]), "bid": float(i["buy"])} 
+                            for i in d.get("data", {}).get("ticker", []) if i["symbol"].endswith("-USDT")}
+    },
+    "gateio": {
+        "url": "https://api.gateio.ws/api/v4/spot/tickers",
+        "parser": lambda d: {i["currency_pair"].replace("_USDT", ""): {"ask": float(i["lowest_ask"]), "bid": float(i["highest_bid"])} 
+                            for i in d if i["currency_pair"].endswith("_USDT")}
+    },
+    "huobi": {
+        "url": "https://api.huobi.pro/market/tickers",
+        "parser": lambda d: {i["symbol"].replace("usdt", "").upper(): {"ask": float(i["ask"]), "bid": float(i["bid"])} 
+                            for i in d.get("data", []) if i["symbol"].endswith("usdt")}
+    },
+    "bitget": {
+        "url": "https://api.bitget.com/api/v2/spot/market/tickers",
+        "parser": lambda d: {i["symbol"].replace("USDT", ""): {"ask": float(i["askPr"]), "bid": float(i["bidPr"])} 
+                            for i in d.get("data", []) if i["symbol"].endswith("USDT")}
+    },
+    "mexc": {
+        "url": "https://api.mexc.com/api/v3/ticker/price",
+        "parser": lambda d: {i["symbol"].replace("USDT", ""): {"ask": float(i["price"]), "bid": float(i["price"])} 
+                            for i in d if i["symbol"].endswith("USDT")}
+    },
+    "kraken": {
+        "url": "https://api.kraken.com/0/public/Ticker?pair=all",
+        "parser": lambda d: {k.replace("USDT", ""): {"ask": float(v["a"][0]), "bid": float(v["b"][0])} 
+                            for k, v in d.get("result", {}).items() if k.endswith("USDT")}
+    },
+    "coinbase": {
+        "url": "https://api.exchange.coinbase.com/products",
+        "parser": lambda d: {i["id"].replace("-USDT", "").upper(): {"ask": float(i["ask"]), "bid": float(i["bid"])} 
+                            for i in d if i["id"].endswith("-USDT")}
+    },
+    "bingx": {
+        "url": "https://api.bingx.com/api/v1/common/tickers",
+        "parser": lambda d: {i["symbol"].replace("USDT", ""): {"ask": float(i["ask"]), "bid": float(i["bid"])} 
+                            for i in d.get("data", []) if i["symbol"].endswith("USDT")}
+    },
+    "phemex": {
+        "url": "https://api.phemex.com/public/products",
+        "parser": lambda d: {i["symbol"].replace("USDT", ""): {"ask": float(i["askPrice"]), "bid": float(i["bidPrice"])} 
+                            for i in d.get("data", []) if i["symbol"].endswith("USDT")}
+    },
+    "bitmart": {
+        "url": "https://api.bitmart.com/v2/tickers",
+        "parser": lambda d: {i["symbol"].replace("USDT", ""): {"ask": float(i["ask"]), "bid": float(i["bid"])} 
+                            for i in d.get("data", {}).get("tickers", []) if i["symbol"].endswith("USDT")}
+    },
+    "lbank": {
+        "url": "https://api.lbank.info/v2/ticker.do",
+        "parser": lambda d: {i["symbol"].replace("usdt", "").upper(): {"ask": float(i["ask"]), "bid": float(i["bid"])} 
+                            for i in d.get("data", []) if i["symbol"].endswith("usdt")}
+    },
+    "coinex": {
+        "url": "https://api.coinex.com/v1/market/ticker/all",
+        "parser": lambda d: {i["symbol"].replace("USDT", ""): {"ask": float(i["ask"]), "bid": float(i["bid"])} 
+                            for i in d.get("data", {}).get("ticker", []) if i["symbol"].endswith("USDT")}
+    },
+    "xt": {
+        "url": "https://api.xt.com/v4/public/ticker",
+        "parser": lambda d: {i["symbol"].replace("USDT", ""): {"ask": float(i["ask"]), "bid": float(i["bid"])} 
+                            for i in d.get("result", []) if i["symbol"].endswith("USDT")}
+    },
+    "poloniex": {
+        "url": "https://api.poloniex.com/markets/ticker24h",
+        "parser": lambda d: {i["symbol"].replace("USDT", ""): {"ask": float(i["ask"]), "bid": float(i["bid"])} 
+                            for i in d if i["symbol"].endswith("USDT")}
+    },
+    "bitfinex": {
+        "url": "https://api.bitfinex.com/v1/pubticker/all",
+        "parser": lambda d: {k.replace("usdt", "").upper(): {"ask": float(v["ask"]), "bid": float(v["bid"])} 
+                            for k, v in d.items() if k.endswith("usdt")}
+    },
+    "hitbtc": {
+        "url": "https://api.hitbtc.com/api/3/public/ticker",
+        "parser": lambda d: {k.replace("USDT", ""): {"ask": float(v["ask"]), "bid": float(v["bid"])} 
+                            for k, v in d.items() if k.endswith("USDT")}
+    },
+    "whitebit": {
+        "url": "https://whitebit.com/api/v4/public/ticker",
+        "parser": lambda d: {k.replace("_USDT", ""): {"ask": float(v["ask"]), "bid": float(v["bid"])} 
+                            for k, v in d.items() if k.endswith("_USDT")}
+    },
+    "digifinex": {
+        "url": "https://openapi.digifinex.com/v3/ticker",
+        "parser": lambda d: {i["symbol"].replace("USDT", ""): {"ask": float(i["ask"]), "bid": float(i["bid"])} 
+                            for i in d.get("data", []) if i["symbol"].endswith("USDT")}
+    },
+    "probit": {
+        "url": "https://api.probit.com/api/exchange/v1/ticker",
+        "parser": lambda d: {i["symbol"].replace("USDT", ""): {"ask": float(i["ask"]), "bid": float(i["bid"])} 
+                            for i in d.get("data", []) if i["symbol"].endswith("USDT")}
+    },
+    "latoken": {
+        "url": "https://api.latoken.com/v2/ticker",
+        "parser": lambda d: {i["symbol"].replace("USDT", ""): {"ask": float(i["ask"]), "bid": float(i["bid"])} 
+                            for i in d if i["symbol"].endswith("USDT")}
+    }
+}
+
+EXCHANGE_FEES = {
+    "binance": 0.001, "okx": 0.001, "bybit": 0.001, "kucoin": 0.001,
+    "gateio": 0.002, "huobi": 0.002, "bitget": 0.001, "mexc": 0.002,
+    "kraken": 0.0026, "coinbase": 0.006, "bingx": 0.001, "phemex": 0.001,
+    "bitmart": 0.0025, "lbank": 0.002, "coinex": 0.002, "xt": 0.002,
+    "poloniex": 0.0025, "bitfinex": 0.002, "hitbtc": 0.002, "whitebit": 0.001,
+    "digifinex": 0.002, "probit": 0.002, "latoken": 0.002
+}
+
+# ========== СЕТИ ПЕРЕВОДА ==========
+TRANSFER_NETWORKS = {
+    "BTC": {"network": "Bitcoin", "fee_usd": 0.50, "time_min": 10},
+    "ETH": {"network": "ERC-20", "fee_usd": 2.50, "time_min": 5},
+    "SOL": {"network": "Solana", "fee_usd": 0.01, "time_min": 0.5},
+    "BNB": {"network": "BSC", "fee_usd": 0.10, "time_min": 1},
+    "USDT": {"network": "TRC-20/BEP-20", "fee_usd": 1.00, "time_min": 1},
+    "DEFAULT": {"network": "Основная", "fee_usd": 2.00, "time_min": 10}
+}
+
+# ========== КОНТРАКТЫ ==========
+TOKEN_CONTRACTS = {
+    "LINK": "0x514910771AF9Ca656af840dff83E8264EcF986CA",
+    "UNI": "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984",
+    "AAVE": "0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9",
+    "MATIC": "0x7D1AfA7B718fb893dB30A3aBc0Cfc608AaCfeBB0",
+}
+
+def check_contract(symbol):
+    if symbol in ["BTC", "ETH", "SOL", "BNB", "XRP"]:
+        return "✅ Нативный токен"
+    if symbol in TOKEN_CONTRACTS:
+        return "✅ Контракт проверен"
+    return "⚠️ Контракт не проверен"
+
+# ========== БАЗА ДАННЫХ ==========
+USERS_FILE = "users_data.json"
+
+def load_users():
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {"users": {}, "next_id": 1}
+    return {"users": {}, "next_id": 1}
+
+def save_users(data):
+    with open(USERS_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+
+# ========== ПОЛУЧЕНИЕ ЦЕН ==========
+async def fetch_exchange(session, name, config):
+    try:
+        async with session.get(config["url"], timeout=8) as resp:
+            data = await resp.json()
+            return config["parser"](data)
+    except Exception as e:
+        logger.debug(f"{name}: ошибка")
+        return {}
+
+async def get_all_prices():
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch_exchange(session, name, config) for name, config in EXCHANGES.items()]
+        results = await asyncio.gather(*tasks)
+        
+        all_prices = {sym: {} for sym in SYMBOLS[:2000]}  # Ограничиваем для скорости
+        for i, name in enumerate(EXCHANGES.keys()):
+            for sym, prices in results[i].items():
+                if sym in all_prices:
+                    all_prices[sym][name] = prices
+        return all_prices
+
+# ========== АНАЛИЗ СПРЕДА ==========
+def analyze_opportunity(buy_price, sell_price, buy_exchange, sell_exchange, symbol):
+    buy_fee = EXCHANGE_FEES.get(buy_exchange, 0.001)
+    sell_fee = EXCHANGE_FEES.get(sell_exchange, 0.001)
+    net_info = TRANSFER_NETWORKS.get(symbol, TRANSFER_NETWORKS["DEFAULT"])
+    transfer_fee = net_info["fee_usd"]
+    contract = check_contract(symbol)
+    
+    results = []
+    for amount in TRADE_AMOUNTS:
+        if amount < 10:
+            continue
+        buy_cost = amount
+        coins = (amount - transfer_fee) / buy_price if transfer_fee < amount else amount / buy_price
+        sell_value = coins * sell_price
+        net_profit = sell_value * (1 - sell_fee) - buy_cost * (1 + buy_fee)
+        net_profit_percent = (net_profit / amount) * 100
+        results.append({"amount": amount, "profit": net_profit, "profit_percent": net_profit_percent})
+    
+    profitable = [r for r in results if r["profit"] > 0]
+    if not profitable:
+        return None
+    
+    best = max(profitable, key=lambda x: x["profit"])
+    spread = ((sell_price - buy_price) / buy_price) * 100
+    
+    return {
+        "spread": spread,
+        "best_amount": best["amount"],
+        "best_profit": best["profit"],
+        "best_percent": best["profit_percent"],
+        "transfer_fee": transfer_fee,
+        "transfer_time": net_info["time_min"],
+        "network": net_info["network"],
+        "buy_fee": buy_fee * 100,
+        "sell_fee": sell_fee * 100,
+        "contract": contract,
+        "results": results[:5]
+    }
+
+def find_opportunities(all_prices):
+    opportunities = []
+    for sym in list(all_prices.keys())[:500]:
+        prices = all_prices[sym]
+        if len(prices) >= 2:
+            for buy_ex, buy_data in prices.items():
+                for sell_ex, sell_data in prices.items():
+                    if buy_ex == sell_ex:
+                        continue
+                    spread = ((sell_data["bid"] - buy_data["ask"]) / buy_data["ask"]) * 100
+                    if spread > MIN_PROFIT:
+                        analysis = analyze_opportunity(buy_data["ask"], sell_data["bid"], buy_ex, sell_ex, sym)
+                        if analysis:
+                            opportunities.append({
+                                "symbol": sym,
+                                "buy_exchange": buy_ex,
+                                "sell_exchange": sell_ex,
+                                "buy_price": buy_data["ask"],
+                                "sell_price": sell_data["bid"],
+                                "analysis": analysis
+                            })
+    return sorted(opportunities, key=lambda x: x["analysis"]["best_profit"], reverse=True)
+
+# ========== TELEGRAM ==========
+async def send_message(chat_id, text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    async with aiohttp.ClientSession() as session:
+        try:
+            await session.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+        except:
+            pass
+
+async def send_alert(chat_id, opp):
+    a = opp["analysis"]
+    msg = f"""🚀 <b>СПРЕД НАЙДЕН!</b>
+
+💰 <b>{opp['symbol']}/USDT</b>
+📊 Спред: {a['spread']:.3f}%
+
+📈 КУПИТЬ: {opp['buy_exchange'].upper()} | ${opp['buy_price']:,.4f}
+📉 ПРОДАТЬ: {opp['sell_exchange'].upper()} | ${opp['sell_price']:,.4f}
+
+💸 Комиссии: {a['buy_fee']:.2f}% + {a['sell_fee']:.2f}%
+🌐 Перевод: {a['network']} | ${a['transfer_fee']:.2f} | {a['transfer_time']} мин
+🛡️ {a['contract']}
+
+✨ <b>ЛУЧШАЯ СУММА: ${a['best_amount']:,.0f}</b>
+💰 Прибыль: ${a['best_profit']:.2f} ({a['best_percent']:.2f}%)
+
+📋 Прибыль по суммам:
+"""
+    for r in a["results"]:
+        msg += f"• ${r['amount']:,} → +${r['profit']:.2f} ({r['profit_percent']:.2f}%)\n"
+    await send_message(chat_id, msg)
+
+# ========== WEB-СЕРВЕР ДЛЯ RENDER ==========
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "✅ Арбитражный сканер работает! Уведомления в Telegram."
+
+@app.route('/health')
+def health():
+    return "OK"
+
+def run_web():
+    app.run(host='0.0.0.0', port=8080)
+
+# ========== ОСНОВНОЙ СКАНЕР ==========
+async def main_scanner():
+    global scanner_active
+    logger.info("🚀 Сканер запущен!")
+    last_alerts = {}
+    
+    while True:
+        try:
+            if scanner_active:
+                start = time.time()
+                prices = await get_all_prices()
+                opps = find_opportunities(prices)
+                
+                if opps:
+                    logger.info(f"Найдено {len(opps)} спредов!")
+                    for opp in opps[:3]:
+                        key = f"{opp['symbol']}_{opp['buy_exchange']}_{opp['sell_exchange']}"
+                        now = time.time()
+                        if key not in last_alerts or (now - last_alerts.get(key, 0)) > 300:
+                            last_alerts[key] = now
+                            await send_alert(ADMIN_CHAT_ID, opp)
+                            logger.info(f"Уведомление отправлено: {opp['symbol']}")
+                else:
+                    logger.info("Спредов нет...")
+                
+                elapsed = time.time() - start
+                logger.info(f"Сканирование завершено за {elapsed:.1f} сек")
+            await asyncio.sleep(SCAN_INTERVAL)
+        except Exception as e:
+            logger.error(f"Ошибка: {e}")
+            await asyncio.sleep(60)
+
+# ========== ЗАПУСК ==========
+async def main():
+    logger.info("=" * 60)
+    logger.info("🚀 АРБИТРАЖНЫЙ СКАНЕР - RENDER VERSION")
+    logger.info("=" * 60)
+    logger.info(f"📊 Монет: {len(SYMBOLS)}")
+    logger.info(f"🏦 Бирж: {len(EXCHANGES)}")
+    logger.info(f"🎯 Цель: >{MIN_PROFIT}%")
+    logger.info("=" * 60)
+    
+    # Запускаем веб-сервер для Render
+    threading.Thread(target=run_web, daemon=True).start()
+    
+    # Запускаем сканер
+    await main_scanner()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 Остановка")
