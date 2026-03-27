@@ -383,7 +383,6 @@ def find_opportunities(all_prices):
     return sorted(opportunities, key=lambda x: x["analysis"]["best_profit"], reverse=True)
 
 # ========== TELEGRAM ==========
-# ========== TELEGRAM ==========
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8780012882:AAHI92nj-1Punbum_5FSzATDy58UgK4JAX4")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "1071868963")
 
@@ -570,10 +569,14 @@ def run_telegram_bot():
 # Функция отправки уведомления всем активным пользователям
 async def send_alert_to_all(opp):
     """Отправляет уведомление всем активным пользователям"""
-    for chat_id, user in user_scanners.items():
-        if user.get("active", False):
-            if telegram_app:
-                await send_telegram_alert(chat_id, opp, telegram_app)
+    async def send_message(chat_id, text):
+    """Старая функция для совместимости"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    async with aiohttp.ClientSession() as session:
+        try:
+            await session.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+        except:
+            pass
 
 📋 Прибыль по суммам:
 """
@@ -633,13 +636,16 @@ async def main():
     logger.info("🚀 АРБИТРАЖНЫЙ СКАНЕР - RENDER VERSION")
     logger.info("=" * 60)
     logger.info(f"📊 Монет: {len(SYMBOLS)}")
-    logger.info(f"Первые 10 монет: {SYMBOLS[:10]}")  # Добавлено для проверки
+    logger.info(f"Первые 10 монет: {SYMBOLS[:10]}")
     logger.info(f"🏦 Бирж: {len(EXCHANGES)}")
     logger.info(f"🎯 Цель: >{MIN_PROFIT}%")
     logger.info("=" * 60)
     
     # Запускаем веб-сервер для Render
     threading.Thread(target=run_web, daemon=True).start()
+    
+    # Запускаем Telegram бота в отдельном потоке
+    threading.Thread(target=run_telegram_bot, daemon=True).start()
     
     # Запускаем сканер
     await main_scanner()
