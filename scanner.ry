@@ -453,6 +453,7 @@ async def main():
     logger.info("🚀 АРБИТРАЖНЫЙ СКАНЕР - RENDER VERSION")
     logger.info("=" * 60)
     logger.info(f"📊 Монет: {len(SYMBOLS)}")
+    logger.info(f"Первые 10 монет: {SYMBOLS[:10]}")  # Добавлено для проверки
     logger.info(f"🏦 Бирж: {len(EXCHANGES)}")
     logger.info(f"🎯 Цель: >{MIN_PROFIT}%")
     logger.info("=" * 60)
@@ -462,11 +463,8 @@ async def main():
     
     # Запускаем сканер
     await main_scanner()
-# ========== АВТОПИНГ (чтобы Render не усыпил) ==========
-import threading
-import requests
-import time as time_module
 
+# ========== АВТОПИНГ (чтобы Render не усыпил) ==========
 def keep_alive():
     """Каждые 10 минут пингует сервер, чтобы Render думал что сервис активен"""
     url = "http://localhost:8080/"
@@ -481,8 +479,10 @@ def keep_alive():
 # Запускаем автопинг в фоновом потоке
 ping_thread = threading.Thread(target=keep_alive, daemon=True)
 ping_thread.start()
+
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("🛑 Остановка")
+
