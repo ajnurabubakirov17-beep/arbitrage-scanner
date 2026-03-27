@@ -2,3 +2,4 @@ aiohttp==3.9.0
 flask==2.3.3
 requests
 python-telegram-bot==20.7
+ccxt
