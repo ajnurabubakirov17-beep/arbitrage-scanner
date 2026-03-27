@@ -9,6 +9,19 @@ import re
 import logging
 from flask import Flask
 import threading
+import asyncio
+import aiohttp
+from datetime import datetime
+import json
+import os
+import time
+import re
+import logging
+from flask import Flask
+import threading
+import requests
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup  # ДОБАВИТЬ
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes  # ДОБАВИТЬ
 
 # ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
 logging.basicConfig(
@@ -22,7 +35,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8780012882:AAHI92nj-1Punbum_5FSzATDy58UgK4JAX4")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "1071868963")
 
-MIN_PROFIT = 0.05
+MIN_PROFIT = 0.2
 SCAN_INTERVAL = 10
 scanner_active = True
 
@@ -370,23 +383,152 @@ def find_opportunities(all_prices):
     return sorted(opportunities, key=lambda x: x["analysis"]["best_profit"], reverse=True)
 
 # ========== TELEGRAM ==========
-async def send_message(chat_id, text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    async with aiohttp.ClientSession() as session:
-        try:
-            await session.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
-        except:
-            pass
+# ========== TELEGRAM ==========
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8780012882:AAHI92nj-1Punbum_5FSzATDy58UgK4JAX4")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "1071868963")
 
-async def send_alert(chat_id, opp):
+# ========== TELEGRAM БОТ С КНОПКАМИ ==========
+# Состояние сканера для каждого пользователя
+user_scanners = {}  # {chat_id: {"active": bool, "min_profit": float, "last_alerts": dict}}
+
+# Клавиатура с кнопками
+def get_main_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("🚀 Запустить сканер", callback_data="start")],
+        [InlineKeyboardButton("⏹️ Остановить сканер", callback_data="stop")],
+        [InlineKeyboardButton("📊 Статус", callback_data="status")],
+        [InlineKeyboardButton("⚙️ Настройки", callback_data="settings")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_settings_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("💰 MIN PROFIT: 0.1%", callback_data="set_profit_01")],
+        [InlineKeyboardButton("💰 MIN PROFIT: 0.2%", callback_data="set_profit_02")],
+        [InlineKeyboardButton("💰 MIN PROFIT: 0.3%", callback_data="set_profit_03")],
+        [InlineKeyboardButton("💰 MIN PROFIT: 0.5%", callback_data="set_profit_05")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="back")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+# Команда /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    
+    if chat_id not in user_scanners:
+        user_scanners[chat_id] = {
+            "active": False,
+            "min_profit": 0.1,
+            "last_alerts": {}
+        }
+    
+    welcome_text = """
+🤖 <b>Арбитражный сканер криптовалют</b>
+
+Я ищу арбитражные возможности между 25 биржами!
+
+📊 <b>Возможности:</b>
+• Анализ 1000+ монет
+• 25 бирж (Binance, OKX, Bybit и др.)
+• Автоматический расчет комиссий
+• Учет времени перевода
+
+<b>Нажмите кнопку "Запустить" чтобы начать получать уведомления!</b>
+    """
+    
+    await update.message.reply_text(
+        welcome_text,
+        parse_mode='HTML',
+        reply_markup=get_main_keyboard()
+    )
+
+# Обработка нажатий на кнопки
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    chat_id = query.message.chat_id
+    data = query.data
+    
+    if chat_id not in user_scanners:
+        user_scanners[chat_id] = {
+            "active": False,
+            "min_profit": 0.1,
+            "last_alerts": {}
+        }
+    
+    user = user_scanners[chat_id]
+    
+    if data == "start":
+        user["active"] = True
+        await query.edit_message_text(
+            "✅ <b>Сканер запущен!</b>\n\nЯ буду присылать уведомления при нахождении арбитражных возможностей.",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+        
+    elif data == "stop":
+        user["active"] = False
+        await query.edit_message_text(
+            "⏹️ <b>Сканер остановлен.</b>\n\nЧтобы возобновить, нажмите 'Запустить'.",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+        
+    elif data == "status":
+        status_text = f"""
+📊 <b>Статус сканера</b>
+
+🟢 Состояние: {'Активен ✅' if user['active'] else 'Остановлен ⏹️'}
+💰 MIN PROFIT: {user['min_profit']}%
+🏦 Бирж: 25
+📈 Монет: {len(SYMBOLS)}
+        """
+        await query.edit_message_text(
+            status_text,
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+        
+    elif data == "settings":
+        await query.edit_message_text(
+            "⚙️ <b>Настройки сканера</b>\n\nВыберите минимальный процент прибыли:",
+            parse_mode='HTML',
+            reply_markup=get_settings_keyboard()
+        )
+        
+    elif data.startswith("set_profit_"):
+        profit_value = float(data.replace("set_profit_", "")) / 100
+        user["min_profit"] = profit_value
+        await query.edit_message_text(
+            f"✅ <b>MIN PROFIT установлен на {profit_value}%</b>\n\nСканер будет присылать уведомления при спреде выше {profit_value}%.",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+        
+    elif data == "back":
+        await query.edit_message_text(
+            "Главное меню:",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+
+# Отправка уведомления через бота
+async def send_telegram_alert(chat_id, opp, context):
+    user = user_scanners.get(chat_id)
+    if not user or not user.get("active", False):
+        return
+    
     a = opp["analysis"]
-    msg = f"""🚀 <b>СПРЕД НАЙДЕН!</b>
+    
+    msg = f"""
+🚀 <b>СПРЕД НАЙДЕН!</b>
 
 💰 <b>{opp['symbol']}/USDT</b>
 📊 Спред: {a['spread']:.3f}%
 
-📈 КУПИТЬ: {opp['buy_exchange'].upper()} | ${opp['buy_price']:,.4f}
-📉 ПРОДАТЬ: {opp['sell_exchange'].upper()} | ${opp['sell_price']:,.4f}
+📈 КУПИТЬ: {opp['buy_exchange'].upper()} | ${opp['buy_price']:,.6f}
+📉 ПРОДАТЬ: {opp['sell_exchange'].upper()} | ${opp['sell_price']:,.6f}
 
 💸 Комиссии: {a['buy_fee']:.2f}% + {a['sell_fee']:.2f}%
 🌐 Перевод: {a['network']} | ${a['transfer_fee']:.2f} | {a['transfer_time']} мин
@@ -394,6 +536,44 @@ async def send_alert(chat_id, opp):
 
 ✨ <b>ЛУЧШАЯ СУММА: ${a['best_amount']:,.0f}</b>
 💰 Прибыль: ${a['best_profit']:.2f} ({a['best_percent']:.2f}%)
+"""
+    
+    # Добавляем прибыль по суммам
+    msg += "\n📋 <b>Прибыль по суммам:</b>\n"
+    for r in a["results"][:5]:
+        msg += f"• ${r['amount']:,} → +${r['profit']:.2f} ({r['profit_percent']:.2f}%)\n"
+    
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Ошибка отправки в Telegram: {e}")
+
+telegram_app = None
+
+def run_telegram_bot():
+    """Запускает Telegram бота в отдельном потоке"""
+    global telegram_app
+    
+    if not TELEGRAM_TOKEN:
+        logger.warning("TELEGRAM_TOKEN не установлен, бот не запущен")
+        return
+    
+    telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    # Регистрируем обработчики
+    telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CallbackQueryHandler(button_callback))
+    
+    # Запускаем бота
+    telegram_app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+# Функция отправки уведомления всем активным пользователям
+async def send_alert_to_all(opp):
+    """Отправляет уведомление всем активным пользователям"""
+    for chat_id, user in user_scanners.items():
+        if user.get("active", False):
+            if telegram_app:
+                await send_telegram_alert(chat_id, opp, telegram_app)
 
 📋 Прибыль по суммам:
 """
