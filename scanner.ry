@@ -578,7 +578,7 @@ async def send_alert_to_all(opp):
         except:
             pass
 
-📋 Прибыль по суммам:
+Прибыль по суммам:
 """
     for r in a["results"]:
         msg += f"• ${r['amount']:,} → +${r['profit']:.2f} ({r['profit_percent']:.2f}%)\n"
