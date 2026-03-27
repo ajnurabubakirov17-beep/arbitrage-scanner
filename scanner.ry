@@ -538,7 +538,7 @@ async def send_telegram_alert(chat_id, opp, context):
 """
     
     # Добавляем прибыль по суммам
-    msg += "\n📋 <b>Прибыль по суммам:</b>\n"
+    msg += "\n💵 <b>Прибыль по суммам:</b>\n"
     for r in a["results"][:5]:
         msg += f"• ${r['amount']:,} → +${r['profit']:.2f} ({r['profit_percent']:.2f}%)\n"
     
