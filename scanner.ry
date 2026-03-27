@@ -10,8 +10,8 @@ from flask import Flask
 import threading
 import requests
 import ccxt
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+# Словарь для хранения состояния пользователей
+user_scanners = {}  # {chat_id: active}
 
 # ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
 logging.basicConfig(
@@ -34,80 +34,63 @@ MIN_LIQUIDITY = 100000  # Минимальная ликвидность в USDT
 # Суммы для расчета прибыли
 TRADE_AMOUNTS = [50, 100, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 5000, 7500, 10000]
 
-# ========== ЗАГРУЗКА 2000+ МОНЕТ ==========
+# ========== ЗАГРУЗКА МОНЕТ ИЗ CCXT ==========
 COINS_FILE = "top_coins.json"
 
 def load_top_coins(force_refresh=False):
     """
-    Загружает топ 2000 монет из CoinGecko API
+    Загружает монеты из CCXT бирж
     """
     if not force_refresh and os.path.exists(COINS_FILE):
         try:
             with open(COINS_FILE, 'r') as f:
                 data = json.load(f)
-                if time.time() - data.get("timestamp", 0) < 86400:  # 24 часа
+                if time.time() - data.get("timestamp", 0) < 86400:
                     logger.info(f"📦 Загружено {len(data['symbols'])} монет из кэша")
                     return data["symbols"]
         except Exception as e:
             logger.warning(f"Ошибка чтения кэша: {e}")
     
-    logger.info("🔄 Загрузка топ 2000 монет из CoinGecko...")
-    all_coins = []
-    per_page = 250
-    pages_needed = 8  # 250 * 8 = 2000
+    logger.info("🔄 Загрузка монет из CCXT бирж...")
+    all_coins = set()
     
-    for page in range(1, pages_needed + 1):
-        url = "https://api.coingecko.com/api/v3/coins/markets"
-        params = {
-            "vs_currency": "usd",
-            "order": "market_cap_desc",
-            "per_page": per_page,
-            "page": page,
-            "sparkline": "false"
-        }
-        
+    # Биржи для сбора монет
+    exchange_names = ['binance', 'okx', 'bybit', 'kucoin', 'gateio', 'huobi', 'mexc']
+    
+    for name in exchange_names:
         try:
-            logger.info(f"  Загрузка страницы {page}/{pages_needed}...")
-            response = requests.get(url, params=params, timeout=30)
+            exchange_class = getattr(ccxt, name)
+            exchange = exchange_class({'enableRateLimit': True, 'timeout': 10000})
+            markets = exchange.load_markets()
             
-            if response.status_code == 429:
-                logger.warning("  Rate limit, ждем 10 секунд...")
-                time.sleep(10)
-                response = requests.get(url, params=params, timeout=30)
+            for market in markets:
+                if '/USDT' in market.upper():
+                    symbol = market.upper().replace('/USDT', '').split(':')[0]
+                    if len(symbol) <= 8 and symbol.isalnum():
+                        all_coins.add(symbol)
             
-            response.raise_for_status()
-            coins = response.json()
-            
-            if not coins:
-                break
-            
-            for coin in coins:
-                symbol = coin.get("symbol", "").upper()
-                if symbol and symbol not in all_coins:
-                    all_coins.append(symbol)
-            
-            logger.info(f"  Загружено {len(coins)} монет (всего: {len(all_coins)})")
-            time.sleep(2)
-            
-        except Exception as e:
-            logger.error(f"Ошибка загрузки страницы {page}: {e}")
-            break
+            logger.info(f"  {name}: добавил монет")
+            time.sleep(0.5)
+        except:
+            pass
+    
+    coins_list = sorted(list(all_coins))
+    
+    # Добавляем базовые монеты если мало
+    if len(coins_list) < 100:
+        basic = ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "DOT", "LINK"]
+        for coin in basic:
+            if coin not in coins_list:
+                coins_list.append(coin)
     
     try:
         with open(COINS_FILE, 'w') as f:
-            json.dump({
-                "timestamp": time.time(),
-                "symbols": all_coins,
-                "count": len(all_coins)
-            }, f)
-        logger.info(f"✅ Сохранено {len(all_coins)} монет в кэш")
-    except Exception as e:
-        logger.warning(f"Не удалось сохранить кэш: {e}")
+            json.dump({"timestamp": time.time(), "symbols": coins_list}, f)
+        logger.info(f"✅ Сохранено {len(coins_list)} монет в кэш")
+    except:
+        pass
     
-    return all_coins
-
-SYMBOLS = load_top_coins()
-logger.info(f"📊 Загружено {len(SYMBOLS)} реальных монет")
+    return coins_list
 
 # ========== 50+ БИРЖ ЧЕРЕЗ CCXT ==========
 EXCHANGE_NAMES = [
@@ -537,19 +520,99 @@ async def send_alert_to_all(opp):
 telegram_app = None
 
 def run_telegram_bot():
-    """Запускает Telegram бота в отдельном потоке"""
-    global telegram_app
+    """Запускает простой Telegram бот без внешних библиотек"""
+    import requests as tg_requests
+    import time as tg_time
     
-    if not TELEGRAM_TOKEN:
-        logger.warning("TELEGRAM_TOKEN не установлен, бот не запущен")
-        return
+    last_update_id = 0
     
-    telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CallbackQueryHandler(button_callback))
-    
-    telegram_app.run_polling(allowed_updates=Update.ALL_TYPES)
+    while True:
+        try:
+            # Получаем обновления
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+            resp = tg_requests.get(url, params={"offset": last_update_id + 1, "timeout": 30})
+            data = resp.json()
+            
+            if not data.get("ok"):
+                continue
+                
+            updates = data.get("result", [])
+            
+            for update in updates:
+                last_update_id = update["update_id"]
+                
+                # Обработка сообщений
+                message = update.get("message")
+                if message:
+                    chat_id = message["chat"]["id"]
+                    text = message.get("text", "")
+                    
+                    if text == "/start":
+                        welcome = f"""🤖 <b>Арбитражный сканер</b>
+
+📊 Монет: {len(SYMBOLS)}
+🏦 Бирж: {len(EXCHANGES)}
+💰 MIN PROFIT: {MIN_PROFIT}%
+
+<b>Команды:</b>
+/start - Показать это сообщение
+/status - Статус сканера
+/on - Включить уведомления
+/off - Выключить уведомления"""
+                        
+                        tg_requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                            json={"chat_id": chat_id, "text": welcome, "parse_mode": "HTML"}
+                        )
+                    
+                    elif text == "/status":
+                        active = user_scanners.get(chat_id, False)
+                        status = f"""📊 <b>Статус сканера</b>
+
+🟢 Уведомления: {'Включены ✅' if active else 'Выключены ⏹️'}
+📈 Монет: {len(SYMBOLS)}
+🏦 Бирж: {len(EXCHANGES)}
+💰 MIN PROFIT: {MIN_PROFIT}%"""
+                        
+                        tg_requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                            json={"chat_id": chat_id, "text": status, "parse_mode": "HTML"}
+                        )
+                    
+                    elif text == "/on":
+                        user_scanners[chat_id] = True
+                        tg_requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                            json={"chat_id": chat_id, "text": "✅ Уведомления включены! Я буду присылать спреды."}
+                        )
+                    
+                    elif text == "/off":
+                        user_scanners[chat_id] = False
+                        tg_requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                            json={"chat_id": chat_id, "text": "⏹️ Уведомления выключены!"}
+                        )
+                
+                # Обработка callback кнопок (если есть)
+                callback = update.get("callback_query")
+                if callback:
+                    chat_id = callback["message"]["chat"]["id"]
+                    data = callback["data"]
+                    
+                    if data == "start":
+                        user_scanners[chat_id] = True
+                    elif data == "stop":
+                        user_scanners[chat_id] = False
+                    
+                    tg_requests.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+                        json={"callback_query_id": callback["id"]}
+                    )
+            
+        except Exception as e:
+            logger.debug(f"Telegram error: {e}")
+        
+        tg_time.sleep(1)
 
 # ========== WEB-СЕРВЕР ДЛЯ RENDER ==========
 app = Flask(__name__)
