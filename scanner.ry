@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8780012882:AAHI92nj-1Punbum_5FSzATDy58UgK4JAX4")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "1071868963")
 
-MIN_PROFIT = 0.2
+MIN_PROFIT = 0.05
 SCAN_INTERVAL = 10
 scanner_active = True
 
