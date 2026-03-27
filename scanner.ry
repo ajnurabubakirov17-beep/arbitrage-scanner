@@ -1,3 +1,4 @@
+import requests
 import asyncio
 import aiohttp
 from datetime import datetime
@@ -29,23 +30,93 @@ TRADE_AMOUNTS = [50, 100, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 5000, 7500
 
 # ========== 6000+ МОНЕТ ==========
 SYMBOLS = [
-    "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "DOT", "LINK",
-    "MATIC", "UNI", "ATOM", "LTC", "ETC", "FIL", "APT", "ARB", "OP", "VET",
-    "ALGO", "NEAR", "ICP", "EGLD", "SAND", "MANA", "GALA", "AAVE", "MKR", "CRV",
-    "QNT", "RNDR", "INJ", "TIA", "SEI", "SUI", "PEPE", "WIF", "FLOKI", "BONK",
-    "SHIB", "XLM", "HBAR", "FTM", "RUNE", "FLOW", "CHZ", "ENJ", "ZIL", "IOST",
-    "KAS", "CFX", "GRT", "SNX", "COMP", "LDO", "RPL", "FXS", "DYDX", "GMX",
-    "IMX", "ENS", "BLUR", "STX", "ORDI", "JUP", "PYTH", "ONDO", "STRK", "W",
-    "ENA", "ETHFI", "REZ", "NOT", "TON", "NEIRO", "POPCAT", "GOAT", "PNUT", "ACT"
-]
+    # ========== ЗАГРУЗКА 1000+ РЕАЛЬНЫХ МОНЕТ ==========
+COINS_FILE = "top_coins.json"
 
-# Генерируем до 6000+
-for i in range(1, 200):
-    SYMBOLS.append(f"COIN{i}")
-for coin in ["PEPE2", "WOJAK", "TURBO", "MOG", "COQ", "SPX", "GIGA", "ANDY", "BRETT", "DOG"]:
-    SYMBOLS.append(coin)
-logger.info(f"📊 Загружено {len(SYMBOLS)} монет")
+def load_top_coins(force_refresh=False):
+    """
+    Загружает топ 1000 монет из CoinGecko API
+    Если файл существует и не старше 24 часов, использует его
+    """
+    # Проверяем, нужно ли обновить кэш
+    if not force_refresh and os.path.exists(COINS_FILE):
+        try:
+            with open(COINS_FILE, 'r') as f:
+                data = json.load(f)
+                # Если файл не старше 24 часов, используем его
+                if time.time() - data.get("timestamp", 0) < 86400:  # 24 часа
+                    logger.info(f"📦 Загружено {len(data['symbols'])} монет из кэша")
+                    return data["symbols"]
+        except Exception as e:
+            logger.warning(f"Ошибка чтения кэша: {e}")
+    
+    # Загружаем свежие данные
+    logger.info("🔄 Загрузка топ 1000 монет из CoinGecko...")
+    all_coins = []
+    
+    # CoinGecko отдаёт максимум 250 монет за запрос
+    per_page = 250
+    pages_needed = 4  # 250 * 4 = 1000
+    
+    for page in range(1, pages_needed + 1):
+        url = "https://api.coingecko.com/api/v3/coins/markets"
+        params = {
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": per_page,
+            "page": page,
+            "sparkline": "false"
+        }
+        
+        try:
+            logger.info(f"  Загрузка страницы {page}/{pages_needed}...")
+            response = requests.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            
+            coins = response.json()
+            if not coins:
+                break
+            
+            # Извлекаем символы монет
+            for coin in coins:
+                symbol = coin.get("symbol", "").upper()
+                if symbol and symbol not in all_coins:
+                    all_coins.append(symbol)
+            
+            logger.info(f"  Загружено {len(coins)} монет (всего: {len(all_coins)})")
+            
+            # Небольшая задержка между запросами
+            time.sleep(1.5)
+            
+        except Exception as e:
+            logger.error(f"Ошибка загрузки страницы {page}: {e}")
+            break
+    
+    # Сохраняем в кэш
+    try:
+        with open(COINS_FILE, 'w') as f:
+            json.dump({
+                "timestamp": time.time(),
+                "symbols": all_coins,
+                "count": len(all_coins)
+            }, f)
+        logger.info(f"✅ Сохранено {len(all_coins)} монет в кэш")
+    except Exception as e:
+        logger.warning(f"Не удалось сохранить кэш: {e}")
+    
+    return all_coins
 
+# Загружаем 1000+ реальных монет
+SYMBOLS = load_top_coins()
+logger.info(f"📊 Загружено {len(SYMBOLS)} реальных монет")
+
+# Если по какой-то причине загрузилось меньше 1000, добавляем популярные
+if len(SYMBOLS) < 1000:
+    popular_coins = ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "DOT", "LINK"]
+    for coin in popular_coins:
+        if coin not in SYMBOLS:
+            SYMBOLS.append(coin)
+    logger.info(f"➕ Добавлено популярных монет, итого: {len(SYMBOLS)}")
 # ========== 25 БИРЖ ==========
 EXCHANGES = {
     "binance": {
