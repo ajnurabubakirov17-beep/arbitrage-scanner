@@ -11,20 +11,17 @@ import ccxt.async_support as ccxt
 # ========= КОНФИГУРАЦИЯ =========
 TELEGRAM_TOKEN = "8780012882:AAHI92nj-1Punbum_5FSzATDy58UgK4JAX4"
 
-# 11 ПОПУЛЯРНЫХ БИРЖ
 EXCHANGES_LIST = [
     'binance', 'okx', 'bybit', 'kucoin', 'gateio', 'huobi', 'bitget', 
     'mexc', 'kraken', 'bitfinex', 'cryptocom'
 ]
 
-# КОМИССИИ БИРЖ
 EXCHANGE_FEES = {
     "binance": 0.001, "okx": 0.001, "bybit": 0.001, "kucoin": 0.001,
     "gateio": 0.002, "huobi": 0.002, "bitget": 0.001, "mexc": 0.002,
     "kraken": 0.0026, "bitfinex": 0.002, "cryptocom": 0.004
 }
 
-# КОМИССИИ СЕТИ
 NETWORK_FEES = {
     "BTC": 5.00, "ETH": 3.00, "SOL": 0.50, "BNB": 0.30, "XRP": 0.20,
     "DOGE": 0.50, "ADA": 0.50, "AVAX": 0.80, "DOT": 1.00, "LINK": 1.00,
@@ -41,20 +38,17 @@ logger = logging.getLogger(__name__)
 EXCHANGES = {}
 USERS = {}
 last_prices = {}
-TOP_COINS = []  # Будет заполнено после инициализации бирж
+TOP_COINS = []
 
-# ========= КЭШ ДЛЯ МОНЕТ =========
 COINS_CACHE_FILE = "coins_cache.json"
 
-def load_coins_from_exchanges():
-    """Собирает все монеты USDT со всех подключенных бирж"""
-    
-    # Проверяем кэш
+# ========= ЗАГРУЗКА МОНЕТ С БИРЖ (АСИНХРОННАЯ) =========
+async def load_coins_from_exchanges():
     if os.path.exists(COINS_CACHE_FILE):
         try:
             with open(COINS_CACHE_FILE, 'r') as f:
                 data = json.load(f)
-                if time.time() - data.get("timestamp", 0) < 86400:  # 24 часа
+                if time.time() - data.get("timestamp", 0) < 86400:
                     coins = data.get("symbols", [])
                     if len(coins) > 100:
                         logger.info(f"📦 Загружено {len(coins)} монет из кэша")
@@ -67,7 +61,7 @@ def load_coins_from_exchanges():
     
     for name, exchange in EXCHANGES.items():
         try:
-            markets = exchange.load_markets()
+            markets = await exchange.load_markets()
             count = 0
             for symbol in markets:
                 if '/USDT' in symbol.upper():
@@ -85,12 +79,7 @@ def load_coins_from_exchanges():
     
     try:
         with open(COINS_CACHE_FILE, 'w') as f:
-            json.dump({
-                "timestamp": time.time(),
-                "symbols": coins_list,
-                "count": len(coins_list)
-            }, f)
-        logger.info(f"💾 Сохранено {len(coins_list)} монет в кэш")
+            json.dump({"timestamp": time.time(), "symbols": coins_list}, f)
     except:
         pass
     
@@ -134,7 +123,7 @@ async def fetch_prices():
     result = {}
     for name, ex in EXCHANGES.items():
         try:
-            for coin in TOP_COINS:
+            for coin in TOP_COINS[:200]:
                 symbol = f"{coin}/USDT"
                 if symbol not in ex.symbols:
                     continue
@@ -213,60 +202,23 @@ def show_main_menu(chat_id):
             [{"text": "🔍 ПОКАЗАТЬ СПРЕДЫ", "callback_data": "show"}],
             [{"text": "💰 СУММА", "callback_data": "amount_menu"},
              {"text": "🎯 MIN СПРЕД", "callback_data": "spread_menu"}],
-            [{"text": "⚙️ РИСК", "callback_data": "risk_menu"},
-             {"text": "🏦 БИРЖИ", "callback_data": "exchanges_menu"}],
             [{"text": "📊 СТАТУС", "callback_data": "status"},
              {"text": "ℹ️ ПОМОЩЬ", "callback_data": "help"}]
         ]
     }
     
     text = f"""
-🤖 <b>ПРОФЕССИОНАЛЬНЫЙ АРБИТРАЖНЫЙ СКАНЕР</b>
+🤖 <b>АРБИТРАЖНЫЙ СКАНЕР</b>
 
-📊 <b>ДАННЫЕ:</b>
-• 🪙 Монет: <b>{len(TOP_COINS)}</b> (с бирж)
-• 🏦 Бирж: <b>{len(EXCHANGES)}</b> активных
+📊 Монет: <b>{len(TOP_COINS)}</b>
+🏦 Бирж: <b>{len(EXCHANGES)}</b>
 
-⚙️ <b>ВАШИ НАСТРОЙКИ:</b>
-• 💰 Сумма: <b>${user.get('amount', 500)}</b>
-• 🎯 Min спред: <b>{user.get('min_spread', 0.3)}%</b>
-• ⚡ Риск: <b>{user.get('risk', 'medium').upper()}</b>
+💰 Сумма: <b>${user.get('amount', 500)}</b>
+🎯 Min спред: <b>{user.get('min_spread', 0.3)}%</b>
 
-👇 <b>ВЫБЕРИТЕ ДЕЙСТВИЕ:</b>
+👇 ВЫБЕРИТЕ ДЕЙСТВИЕ:
 """
     send_message(chat_id, text, json.dumps(keyboard))
-
-def get_amount_keyboard():
-    return {"inline_keyboard": [
-        [{"text": "💵 $100", "callback_data": "amt_100"}, {"text": "💵 $300", "callback_data": "amt_300"}, {"text": "💵 $500", "callback_data": "amt_500"}],
-        [{"text": "💵 $1000", "callback_data": "amt_1000"}, {"text": "💵 $3000", "callback_data": "amt_3000"}, {"text": "💵 $5000", "callback_data": "amt_5000"}],
-        [{"text": "💵 $10000", "callback_data": "amt_10000"}, {"text": "🔙 НАЗАД", "callback_data": "back"}]
-    ]}
-
-def get_spread_keyboard():
-    return {"inline_keyboard": [
-        [{"text": "🎯 0.1%", "callback_data": "spread_01"}, {"text": "🎯 0.2%", "callback_data": "spread_02"}, {"text": "🎯 0.3%", "callback_data": "spread_03"}],
-        [{"text": "🎯 0.5%", "callback_data": "spread_05"}, {"text": "🎯 1.0%", "callback_data": "spread_10"}, {"text": "🎯 2.0%", "callback_data": "spread_20"}],
-        [{"text": "🔙 НАЗАД", "callback_data": "back"}]
-    ]}
-
-def get_risk_keyboard():
-    return {"inline_keyboard": [
-        [{"text": "🟢 НИЗКИЙ (volume > $200k)", "callback_data": "risk_low"}],
-        [{"text": "🟡 СРЕДНИЙ (volume > $50k)", "callback_data": "risk_medium"}],
-        [{"text": "🔴 ВЫСОКИЙ (volume > $10k)", "callback_data": "risk_high"}],
-        [{"text": "🔙 НАЗАД", "callback_data": "back"}]
-    ]}
-
-def get_exchanges_keyboard(chat_id):
-    user = USERS.get(chat_id, {})
-    user_exchanges = user.get('exchanges', EXCHANGES_LIST.copy())
-    buttons = []
-    for ex in EXCHANGES_LIST:
-        status = "✅" if ex in user_exchanges else "❌"
-        buttons.append([{"text": f"{status} {ex.upper()}", "callback_data": f"ex_{ex}"}])
-    buttons.append([{"text": "🔙 НАЗАД", "callback_data": "back"}])
-    return {"inline_keyboard": buttons}
 
 def run_telegram():
     last_id = 0
@@ -283,16 +235,9 @@ def run_telegram():
                 msg = update.get("message")
                 if msg:
                     chat_id = msg["chat"]["id"]
-                    text = msg.get("text", "")
-                    
                     if chat_id not in USERS:
-                        USERS[chat_id] = {
-                            "active": False, "amount": 500, "min_spread": 0.3,
-                            "risk": "medium", "exchanges": EXCHANGES_LIST.copy(),
-                            "last_alerts": {}
-                        }
-                    
-                    if text == "/start":
+                        USERS[chat_id] = {"active": False, "amount": 500, "min_spread": 0.3, "last_alerts": {}}
+                    if msg.get("text") == "/start":
                         show_main_menu(chat_id)
                 
                 callback = update.get("callback_query")
@@ -301,11 +246,7 @@ def run_telegram():
                     data_cb = callback["data"]
                     
                     if chat_id not in USERS:
-                        USERS[chat_id] = {
-                            "active": False, "amount": 500, "min_spread": 0.3,
-                            "risk": "medium", "exchanges": EXCHANGES_LIST.copy(),
-                            "last_alerts": {}
-                        }
+                        USERS[chat_id] = {"active": False, "amount": 500, "min_spread": 0.3, "last_alerts": {}}
                     
                     user = USERS[chat_id]
                     
@@ -318,47 +259,32 @@ def run_telegram():
                         send_message(chat_id, "⏹️ Уведомления ВЫКЛЮЧЕНЫ!")
                         show_main_menu(chat_id)
                     elif data_cb == "amount_menu":
-                        send_message(chat_id, "💰 ВЫБЕРИТЕ СУММУ:", json.dumps(get_amount_keyboard()))
+                        keyboard = {"inline_keyboard": [
+                            [{"text": "$500", "callback_data": "amt_500"}, {"text": "$1000", "callback_data": "amt_1000"}, {"text": "$5000", "callback_data": "amt_5000"}],
+                            [{"text": "🔙 НАЗАД", "callback_data": "back"}]
+                        ]}
+                        send_message(chat_id, "💰 ВЫБЕРИТЕ СУММУ:", json.dumps(keyboard))
                     elif data_cb.startswith("amt_"):
-                        amount = int(data_cb.replace("amt_", ""))
-                        user["amount"] = amount
-                        send_message(chat_id, f"✅ Сумма: ${amount}")
+                        user["amount"] = int(data_cb.replace("amt_", ""))
+                        send_message(chat_id, f"✅ Сумма: ${user['amount']}")
                         show_main_menu(chat_id)
                     elif data_cb == "spread_menu":
-                        send_message(chat_id, "🎯 ВЫБЕРИТЕ MIN СПРЕД:", json.dumps(get_spread_keyboard()))
+                        keyboard = {"inline_keyboard": [
+                            [{"text": "0.1%", "callback_data": "spread_01"}, {"text": "0.3%", "callback_data": "spread_03"}, {"text": "0.5%", "callback_data": "spread_05"}],
+                            [{"text": "🔙 НАЗАД", "callback_data": "back"}]
+                        ]}
+                        send_message(chat_id, "🎯 ВЫБЕРИТЕ MIN СПРЕД:", json.dumps(keyboard))
                     elif data_cb.startswith("spread_"):
-                        spread = float(data_cb.replace("spread_", "")) / 100
-                        user["min_spread"] = spread
-                        send_message(chat_id, f"✅ Min спред: {spread}%")
+                        user["min_spread"] = float(data_cb.replace("spread_", "")) / 100
+                        send_message(chat_id, f"✅ Min спред: {user['min_spread']}%")
                         show_main_menu(chat_id)
-                    elif data_cb == "risk_menu":
-                        send_message(chat_id, "⚙️ ВЫБЕРИТЕ РИСК:", json.dumps(get_risk_keyboard()))
-                    elif data_cb.startswith("risk_"):
-                        risk = data_cb.replace("risk_", "")
-                        user["risk"] = risk
-                        send_message(chat_id, f"✅ Риск: {risk.upper()}")
-                        show_main_menu(chat_id)
-                    elif data_cb == "exchanges_menu":
-                        send_message(chat_id, "🏦 ВЫБЕРИТЕ БИРЖИ:", json.dumps(get_exchanges_keyboard(chat_id)))
-                    elif data_cb.startswith("ex_"):
-                        ex_name = data_cb.replace("ex_", "")
-                        if ex_name in user["exchanges"]:
-                            user["exchanges"].remove(ex_name)
-                        else:
-                            user["exchanges"].append(ex_name)
-                        send_message(chat_id, "🏦 ВЫБЕРИТЕ БИРЖИ:", json.dumps(get_exchanges_keyboard(chat_id)))
                     elif data_cb == "show":
                         send_message(chat_id, "🔍 ИЩУ СПРЕДЫ...")
                         if last_prices:
-                            filtered = {}
-                            for coin, exchanges in last_prices.items():
-                                filtered_ex = {k: v for k, v in exchanges.items() if k in user["exchanges"]}
-                                if len(filtered_ex) >= 2:
-                                    filtered[coin] = filtered_ex
-                            opps = find_opportunities(filtered, user)
+                            opps = find_opportunities(last_prices, user)
                             if opps:
                                 for opp in opps[:5]:
-                                    msg = f"🚀 <b>{opp['coin']}/USDT</b>\n📈 {opp['buy'].upper()} → {opp['sell'].upper()}\n📊 Спред: {opp['spread']:.2f}%\n💰 Прибыль: ${opp['net_profit']:.2f}"
+                                    msg = f"🚀 {opp['coin']}\n{opp['buy']} → {opp['sell']}\nСпред: {opp['spread']:.2f}%\nПрибыль: ${opp['net_profit']:.2f}"
                                     send_message(chat_id, msg)
                             else:
                                 send_message(chat_id, "😴 Спредов нет")
@@ -366,13 +292,11 @@ def run_telegram():
                             send_message(chat_id, "🔄 Данные загружаются...")
                         show_main_menu(chat_id)
                     elif data_cb == "status":
-                        active = "Да ✅" if user["active"] else "Нет ⏹️"
-                        status = f"📊 СТАТУС\n\n🟢 Активен: {active}\n💰 Сумма: ${user['amount']}\n🎯 Min спред: {user['min_spread']}%\n⚡ Риск: {user['risk'].upper()}\n🪙 Монет: {len(TOP_COINS)}\n🏦 Бирж: {len(EXCHANGES)}"
+                        status = f"📊 СТАТУС\n\nАктивен: {'Да' if user['active'] else 'Нет'}\nСумма: ${user['amount']}\nMin спред: {user['min_spread']}%\nМонет: {len(TOP_COINS)}\nБирж: {len(EXCHANGES)}"
                         send_message(chat_id, status)
                         show_main_menu(chat_id)
                     elif data_cb == "help":
-                        help_text = "ℹ️ ПОМОЩЬ\n\n• ЗАПУСТИТЬ — включить автоуведомления\n• ПОКАЗАТЬ СПРЕДЫ — ручной поиск\n• Настройки — сумма, спред, риск, биржи"
-                        send_message(chat_id, help_text)
+                        send_message(chat_id, "ℹ️ ПОМОЩЬ\n\n🚀 ЗАПУСТИТЬ — включить уведомления\n⏹️ ОСТАНОВИТЬ — выключить\n🔍 ПОКАЗАТЬ СПРЕДЫ — ручной поиск\n💰 СУММА — изменить сумму\n🎯 MIN СПРЕД — изменить порог")
                         show_main_menu(chat_id)
                     elif data_cb == "back":
                         show_main_menu(chat_id)
@@ -396,12 +320,7 @@ async def scanner():
             
             for chat_id, user in USERS.items():
                 if user.get("active"):
-                    filtered = {}
-                    for coin, exchanges in prices.items():
-                        filtered_ex = {k: v for k, v in exchanges.items() if k in user["exchanges"]}
-                        if len(filtered_ex) >= 2:
-                            filtered[coin] = filtered_ex
-                    opps = find_opportunities(filtered, user)
+                    opps = find_opportunities(prices, user)
                     for opp in opps[:3]:
                         key = f"{opp['coin']}_{opp['buy']}_{opp['sell']}"
                         now = time.time()
@@ -419,27 +338,21 @@ async def scanner():
 
 # ========= ЗАПУСК =========
 async def main():
-    # Сначала загружаем биржи
     await init_exchanges()
     
-    # Затем загружаем монеты с бирж
     global TOP_COINS
-    TOP_COINS = load_coins_from_exchanges()
-    logger.info(f"🎯 ЗАГРУЖЕНО {len(TOP_COINS)} МОНЕТ С БИРЖ")
+    TOP_COINS = await load_coins_from_exchanges()
+    logger.info(f"🎯 ЗАГРУЖЕНО {len(TOP_COINS)} МОНЕТ")
     
-    # Запускаем веб-сервер
     threading.Thread(target=run_web, daemon=True).start()
     threading.Thread(target=keep_alive, daemon=True).start()
-    
-    # Запускаем Telegram
     threading.Thread(target=run_telegram, daemon=True).start()
     
-    logger.info("=" * 60)
-    logger.info("🚀 ПРОФЕССИОНАЛЬНЫЙ АРБИТРАЖНЫЙ СКАНЕР")
-    logger.info("=" * 60)
+    logger.info("=" * 50)
+    logger.info("🚀 АРБИТРАЖНЫЙ СКАНЕР ЗАПУЩЕН")
     logger.info(f"📊 МОНЕТ: {len(TOP_COINS)}")
-    logger.info(f"🏦 БИРЖ: {len(EXCHANGES)} из {len(EXCHANGES_LIST)}")
-    logger.info("=" * 60)
+    logger.info(f"🏦 БИРЖ: {len(EXCHANGES)}")
+    logger.info("=" * 50)
     
     await scanner()
 
