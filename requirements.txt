@@ -1,6 +1,6 @@
-aiohttp==3.9.5
-requests==2.31.0
 ccxt==4.3.0
 python-telegram-bot==20.7
-Flask==3.0.2
+aiohttp==3.9.5
+websockets==12.0
+
 
