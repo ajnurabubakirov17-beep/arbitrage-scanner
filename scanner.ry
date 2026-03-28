@@ -45,55 +45,73 @@ EXCHANGES = {}
 USERS = {}
 last_prices = {}
 
-# ========= ЗАГРУЗКА МОНЕТ (ГОТОВЫЙ СПИСОК 1000+) =========
+# ========= ЗАГРУЗКА МОНЕТ НАПРЯМУЮ С БИРЖ =========
 COINS_CACHE_FILE = "coins_cache.json"
 
-# Готовый список 1000+ монет
-def load_all_coins():
-    """Возвращает список 1000+ монет (без API запросов)"""
+def load_coins_from_exchanges():
+    """Собирает все монеты USDT со всех подключенных бирж"""
     
     # Проверяем кэш
     if os.path.exists(COINS_CACHE_FILE):
         try:
             with open(COINS_CACHE_FILE, 'r') as f:
                 data = json.load(f)
-                if time.time() - data.get("timestamp", 0) < 604800:  # 7 дней
+                if time.time() - data.get("timestamp", 0) < 86400:  # 24 часа
                     coins = data.get("symbols", [])
-                    if len(coins) > 500:
+                    if len(coins) > 100:
                         logger.info(f"📦 Загружено {len(coins)} монет из кэша")
                         return coins
         except:
             pass
     
-    # Готовый список 1000+ монет
-    coins_list = [
-        "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "DOT", "LINK",
-        "MATIC", "UNI", "ATOM", "LTC", "ETC", "FIL", "APT", "ARB", "OP", "VET",
-        "ALGO", "NEAR", "ICP", "EGLD", "SAND", "MANA", "GALA", "AAVE", "MKR", "CRV",
-        "QNT", "RNDR", "INJ", "TIA", "SEI", "SUI", "PEPE", "WIF", "FLOKI", "BONK",
-        "SHIB", "XLM", "HBAR", "FTM", "RUNE", "FLOW", "CHZ", "ENJ", "ZIL", "IOST",
-        "KAS", "CFX", "GRT", "SNX", "COMP", "LDO", "RPL", "FXS", "DYDX", "GMX",
-        "IMX", "ENS", "BLUR", "STX", "ORDI", "JUP", "PYTH", "ONDO", "STRK", "W",
-        "ENA", "ETHFI", "REZ", "NOT", "TON", "NEIRO", "POPCAT", "GOAT", "ACT", "SUPER",
-        "OCEAN", "AGIX", "FET", "RLC", "STORJ", "ANKR", "ZEC", "DASH", "XMR", "CELO",
-        "GLM", "GNO", "BAT", "ZRX", "KNC", "LRC", "BAL", "YFI", "SUSHI", "CAKE",
-        "AXS", "SLP", "YGG", "ILV", "MAGIC", "WAXP", "TLM", "GHST", "REQ", "RAD",
-        "LIT", "COTI", "CTSI", "CHR", "CVC", "DENT", "HOT", "IOTX", "JASMY", "KSM",
-        "MOVR", "GLMR", "ACA", "ASTR", "SDN", "ONE", "NEON", "SC", "AR", "BLZ"
-    ]
+    logger.info("🔄 Сбор монет с бирж...")
+    all_coins = set()
+    
+    # Перебираем все подключенные биржи
+    for name, exchange in EXCHANGES.items():
+        try:
+            # Получаем все рынки биржи
+            markets = exchange.load_markets()
+            count = 0
+            
+            for symbol in markets:
+                if '/USDT' in symbol.upper():
+                    # Извлекаем название монеты
+                    coin = symbol.upper().replace('/USDT', '').split(':')[0]
+                    # Очищаем от лишних символов
+                    coin = ''.join(c for c in coin if c.isalnum())
+                    if len(coin) <= 8 and coin not in all_coins:
+                        all_coins.add(coin)
+                        count += 1
+            
+            logger.info(f"  ✅ {name}: +{count} монет")
+            
+        except Exception as e:
+            logger.warning(f"  ⚠️ {name}: ошибка - {str(e)[:30]}")
+    
+    coins_list = sorted(list(all_coins))
+    logger.info(f"🎯 Всего собрано монет: {len(coins_list)}")
     
     # Сохраняем кэш
     try:
         with open(COINS_CACHE_FILE, 'w') as f:
-            json.dump({"timestamp": time.time(), "symbols": coins_list}, f)
+            json.dump({
+                "timestamp": time.time(),
+                "symbols": coins_list,
+                "count": len(coins_list)
+            }, f)
         logger.info(f"💾 Сохранено {len(coins_list)} монет в кэш")
     except:
         pass
     
     return coins_list
 
-TOP_COINS = load_all_coins()
-logger.info(f"🎯 ЗАГРУЖЕНО {len(TOP_COINS)} МОНЕТ")
+# Загружаем монеты ПОСЛЕ инициализации бирж
+# ВНИМАНИЕ: эта функция должна вызываться после init_exchanges()
+
+# ========= ЗАГРУЗКА МОНЕТ С БИРЖ =========
+COINS_CACHE_FILE = "coins_cache.json"
+TOP_COINS = []  # Пока пустой, заполнится после инициализации бирж
 
 # ЗАГРУЖАЕМ ВСЕ МОНЕТЫ
 TOP_COINS = load_all_coins()
@@ -523,10 +541,64 @@ async def scanner():
             logger.error(f"Ошибка сканера: {e}")
         
         await asyncio.sleep(15)
+def load_coins_from_exchanges():
+    """Собирает все монеты USDT со всех подключенных бирж"""
+    
+    # Проверяем кэш
+    if os.path.exists(COINS_CACHE_FILE):
+        try:
+            with open(COINS_CACHE_FILE, 'r') as f:
+                data = json.load(f)
+                if time.time() - data.get("timestamp", 0) < 86400:
+                    coins = data.get("symbols", [])
+                    if len(coins) > 100:
+                        logger.info(f"📦 Из кэша: {len(coins)} монет")
+                        return coins
+        except:
+            pass
+    
+    logger.info("🔄 Сбор монет с бирж...")
+    all_coins = set()
+    
+    for name, exchange in EXCHANGES.items():
+        try:
+            markets = exchange.load_markets()
+            count = 0
+            for symbol in markets:
+                if '/USDT' in symbol.upper():
+                    coin = symbol.upper().replace('/USDT', '').split(':')[0]
+                    coin = ''.join(c for c in coin if c.isalnum())
+                    if len(coin) <= 8 and coin not in all_coins:
+                        all_coins.add(coin)
+                        count += 1
+            logger.info(f"  ✅ {name}: +{count} монет")
+        except:
+            pass
+    
+    coins_list = sorted(list(all_coins))
+    logger.info(f"🎯 Всего: {len(coins_list)} монет")
+    
+    try:
+        with open(COINS_CACHE_FILE, 'w') as f:
+            json.dump({"timestamp": time.time(), "symbols": coins_list}, f)
+    except:
+        pass
+    
+    return coins_list
 
 # ========= ЗАПУСК =========
 async def main():
     await init_exchanges()
+async def main():
+    # Сначала загружаем биржи
+    await init_exchanges()
+    
+    # Затем загружаем монеты с бирж
+    global TOP_COINS
+    TOP_COINS = load_coins_from_exchanges()
+    logger.info(f"🎯 ЗАГРУЖЕНО {len(TOP_COINS)} МОНЕТ С БИРЖ")
+    
+    # Остальной код...
     
     threading.Thread(target=run_web, daemon=True).start()
     threading.Thread(target=keep_alive, daemon=True).start()
