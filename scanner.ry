@@ -113,9 +113,18 @@ def load_coins_from_exchanges():
 COINS_CACHE_FILE = "coins_cache.json"
 TOP_COINS = []  # Пока пустой, заполнится после инициализации бирж
 
-# ЗАГРУЖАЕМ ВСЕ МОНЕТЫ
-TOP_COINS = load_all_coins()
-logger.info(f"🎯 ЗАГРУЖЕНО {len(TOP_COINS)} МОНЕТ")
+# Удалить эти строки:
+# TOP_COINS = load_all_coins()
+
+# Вместо них оставить пустой список
+TOP_COINS = []
+
+# А после init_exchanges() добавить загрузку:
+async def main():
+    await init_exchanges()
+    
+    global TOP_COINS
+    TOP_COINS = load_coins_from_exchanges()  # Нужно добавить эту функцию
 
 # ========= ВЕБ-СЕРВЕР ДЛЯ RENDER =========
 app = Flask(__name__)
