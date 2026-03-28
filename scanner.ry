@@ -2,622 +2,280 @@ import asyncio
 import ccxt.async_support as ccxt
 import logging
 import time
-import json
-import os
-import requests
 import threading
-from datetime import datetime
-from decimal import Decimal
-from flask import Flask, jsonify
-
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import requests
+from flask import Flask
 
 # ========= КОНФИГУРАЦИЯ =========
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8780012882:AAHI92nj-1Punbum_5FSzATDy58UgK4JAX4")
+TELEGRAM_TOKEN = "8780012882:AAHI92nj-1Punbum_5FSzATDy58UgK4JAX4"
 
-# 11 ПОПУЛЯРНЫХ БИРЖ
-EXCHANGES_LIST = [
-    'binance', 'okx', 'bybit', 'kucoin', 'gateio', 'huobi', 'bitget', 'mexc', 'kraken', 'bitfinex', 'cryptocom'
-]
+# Биржи
+EXCHANGES_LIST = ['binance', 'okx', 'bybit', 'kucoin']
 
-# КОМИССИИ БИРЖ
-FEES = {
-    "binance": 0.001, "okx": 0.001, "bybit": 0.001, "kucoin": 0.001,
-    "gateio": 0.002, "huobi": 0.002, "bitget": 0.001, "mexc": 0.002,
-    "kraken": 0.0026, "bitfinex": 0.002, "cryptocom": 0.004
-}
+# Монеты
+BASE_COINS = ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "DOT", "LINK"]
 
-# КОМИССИИ СЕТИ (USD)
-NETWORK_FEES = {
-    "BTC": 5.00, "ETH": 3.00, "SOL": 0.50, "BNB": 0.30, "XRP": 0.20,
-    "DOGE": 0.50, "ADA": 0.50, "AVAX": 0.80, "DOT": 1.00, "LINK": 1.00,
-    "MATIC": 0.50, "UNI": 1.50, "ATOM": 0.80, "LTC": 0.50, "ETC": 0.80,
-    "DEFAULT": 2.00
-}
-
-# ВРЕМЯ ПЕРЕВОДА (минуты)
-TRANSFER_TIME = {
-    "BTC": 30, "ETH": 10, "SOL": 1, "BNB": 2, "XRP": 2, "DOGE": 10,
-    "ADA": 5, "AVAX": 3, "DOT": 5, "LINK": 10, "DEFAULT": 15
-}
-
-# ========= ЗАГРУЗКА ТОП-1000 МОНЕТ =========
-COINS_CACHE = "coins_cache.json"
-
-def load_top_coins():
-    if os.path.exists(COINS_CACHE):
-        try:
-            with open(COINS_CACHE, 'r') as f:
-                data = json.load(f)
-                if time.time() - data.get("timestamp", 0) < 86400:
-                    coins = data.get("symbols", [])
-                    if len(coins) >1000:
-                        logging.info(f"📦 Загружено {len(coins)} монет из кэша")
-                        return coins
-        except:
-            pass
-    
-    top_coins = [
-        "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "DOT", "LINK",
-        "MATIC", "UNI", "ATOM", "LTC", "ETC", "FIL", "APT", "ARB", "OP", "VET",
-        "ALGO", "NEAR", "ICP", "EGLD", "SAND", "MANA", "GALA", "AAVE", "MKR", "CRV",
-        "QNT", "RNDR", "INJ", "TIA", "SEI", "SUI", "PEPE", "WIF", "FLOKI", "BONK",
-        "SHIB", "XLM", "HBAR", "FTM", "RUNE", "FLOW", "CHZ", "ENJ", "ZIL", "IOST",
-        "KAS", "CFX", "GRT", "SNX", "COMP", "LDO", "RPL", "FXS", "DYDX", "GMX",
-        "IMX", "ENS", "BLUR", "STX", "ORDI", "JUP", "PYTH", "ONDO", "STRK", "W"
-    ]
-    
-    try:
-        with open(COINS_CACHE, 'w') as f:
-            json.dump({"timestamp": time.time(), "symbols": top_coins}, f)
-    except:
-        pass
-    
-    return top_coins
-
-BASE_COINS = load_top_coins()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-logger.info(f"🎯 ЗАГРУЖЕНО {len(BASE_COINS)} МОНЕТ")
 
-# ========= СОСТОЯНИЕ ПОЛЬЗОВАТЕЛЕЙ =========
-USERS = {}
 EXCHANGES = {}
-last_scan_data = {"prices": {}, "opportunities": [], "timestamp": 0}
-scan_lock = asyncio.Lock()
+USERS = {}
+last_prices = {}
 
-# ========= АВТОПИНГ ДЛЯ RENDER =========
-app_flask = Flask(__name__)
+# ========= ВЕБ-СЕРВЕР ДЛЯ RENDER =========
+app = Flask(__name__)
 
-@app_flask.route('/')
+@app.route('/')
 def home():
     return "✅ Арбитражный сканер работает!"
 
-@app_flask.route('/health')
+@app.route('/health')
 def health():
-    return jsonify({"status": "ok", "users": len(USERS), "coins": len(BASE_COINS), "exchanges": len(EXCHANGES)})
+    return "OK"
 
-def run_web_server():
-    """Запускает веб-сервер для Render"""
-    app_flask.run(host='0.0.0.0', port=8080, debug=False)
+def run_web():
+    app.run(host='0.0.0.0', port=8080, debug=False)
 
 def keep_alive():
-    """Пинг сам себя каждые 5 минут, чтобы Render не усыпил"""
+    """Пинг каждые 5 минут, чтобы Render не усыпил"""
     while True:
         try:
-            response = requests.get("http://localhost:8080/health", timeout=5)
-            if response.status_code == 200:
-                logger.debug("🔄 Автопинг: сервер активен")
-            else:
-                logger.warning("⚠️ Автопинг: странный ответ")
-        except Exception as e:
-            logger.warning(f"⚠️ Автопинг: ошибка - {e}")
-        time.sleep(300)  # 5 минут
+            requests.get("http://localhost:8080/health", timeout=5)
+            logger.debug("🔄 Автопинг")
+        except:
+            pass
+        time.sleep(300)
 
-# ========= ИНИЦИАЛИЗАЦИЯ БИРЖ =========
+# ========= БИРЖИ =========
 async def init_exchanges():
     for name in EXCHANGES_LIST:
         try:
-            ex = getattr(ccxt, name)({
-                "enableRateLimit": True,
-                "timeout": 30000,
-                "options": {"defaultType": "spot"}
-            })
+            ex = getattr(ccxt, name)({'enableRateLimit': True, 'timeout': 10000})
             await ex.load_markets()
             EXCHANGES[name] = ex
             logger.info(f"✅ {name}")
         except Exception as e:
-            logger.warning(f"⚠️ {name}: {str(e)[:30]}")
-    logger.info(f"🏦 Активных бирж: {len(EXCHANGES)} из {len(EXCHANGES_LIST)}")
+            logger.warning(f"⚠️ {name}")
 
-# ========= ПОЛУЧЕНИЕ ЦЕН =========
-async def fetch_all_prices():
-    """Получает цены со всех бирж"""
+# ========= ЦЕНЫ =========
+async def fetch_prices():
     result = {}
-    
     for name, ex in EXCHANGES.items():
         try:
             for coin in BASE_COINS:
                 symbol = f"{coin}/USDT"
-                if symbol not in ex.symbols:
-                    continue
-                
-                ticker = await ex.fetch_ticker(symbol)
-                volume = ticker.get("quoteVolume", 0) or ticker.get("baseVolume", 0)
-                if volume < 100000:
-                    continue
-                
-                result.setdefault(coin, {})[name] = {
-                    "bid": ticker.get("bid", 0),
-                    "ask": ticker.get("ask", 0),
-                    "last": ticker.get("last", 0),
-                    "volume": volume
-                }
-        except Exception as e:
-            logger.debug(f"{name}: ошибка")
-    
+                if symbol in ex.symbols:
+                    ticker = await ex.fetch_ticker(symbol)
+                    result[coin] = result.get(coin, {})
+                    result[coin][name] = {
+                        'bid': ticker.get('bid', 0) or ticker.get('last', 0),
+                        'ask': ticker.get('ask', 0) or ticker.get('last', 0)
+                    }
+        except:
+            pass
     return result
 
-# ========= АНАЛИЗ АРБИТРАЖА =========
-def analyze_arbitrage(data, settings):
-    opportunities = []
-    min_spread = settings.get("min_spread", 0.3)
-    amount = settings.get("amount", 500)
+# ========= АНАЛИЗ =========
+def find_opportunities(prices, settings):
+    opps = []
+    amount = settings.get('amount', 500)
+    min_spread = settings.get('min_spread', 0.3)
     
-    for coin, exchanges in data.items():
+    for coin, exchanges in prices.items():
         if len(exchanges) < 2:
             continue
-        
-        network_fee = NETWORK_FEES.get(coin, NETWORK_FEES["DEFAULT"])
-        transfer_time = TRANSFER_TIME.get(coin, TRANSFER_TIME["DEFAULT"])
-        
         for buy_ex, buy_data in exchanges.items():
             for sell_ex, sell_data in exchanges.items():
                 if buy_ex == sell_ex:
                     continue
-                
-                ask = buy_data.get("ask") or buy_data.get("last")
-                bid = sell_data.get("bid") or sell_data.get("last")
-                
-                if not ask or not bid or ask <= 0 or bid <= 0:
+                ask = buy_data.get('ask', 0)
+                bid = sell_data.get('bid', 0)
+                if ask <= 0 or bid <= 0:
                     continue
-                
-                spread = ((bid - ask) / ask) * 100
-                if spread < min_spread:
-                    continue
-                
-                buy_fee = FEES.get(buy_ex, 0.001)
-                sell_fee = FEES.get(sell_ex, 0.001)
-                
-                coins_bought = amount / ask
-                sell_value = coins_bought * bid
-                gross_profit = sell_value - amount
-                total_fees = (amount * buy_fee) + (sell_value * sell_fee) + network_fee
-                net_profit = gross_profit - total_fees
-                net_profit_percent = (net_profit / amount) * 100
-                
-                if net_profit > 0:
-                    opportunities.append({
-                        "coin": coin,
-                        "buy_exchange": buy_ex,
-                        "sell_exchange": sell_ex,
-                        "buy_price": ask,
-                        "sell_price": bid,
-                        "spread": spread,
-                        "net_profit": net_profit,
-                        "profit_percent": net_profit_percent,
-                        "network_fee": network_fee,
-                        "transfer_time": transfer_time,
-                        "buy_fee": buy_fee * 100,
-                        "sell_fee": sell_fee * 100,
-                        "volume": min(buy_data.get("volume", 0), sell_data.get("volume", 0))
+                spread = (bid - ask) / ask * 100
+                if spread > min_spread:
+                    profit = (amount / ask) * bid - amount
+                    opps.append({
+                        'coin': coin,
+                        'buy': buy_ex,
+                        'sell': sell_ex,
+                        'spread': spread,
+                        'profit': profit
                     })
-    
-    return sorted(opportunities, key=lambda x: x["net_profit"], reverse=True)
+    return sorted(opps, key=lambda x: x['profit'], reverse=True)
 
-# ========= ФОНДОВОЕ СКАНИРОВАНИЕ (только сохранение данных) =========
-async def background_scanner():
-    """Фоновое сканирование - только сохраняет данные, не отправляет уведомления"""
-    global last_scan_data
-    logger.info("🚀 ФОНОВЫЙ СКАНЕР ЗАПУЩЕН (только сбор данных)")
+# ========= TELEGRAM (БЕЗ БИБЛИОТЕКИ) =========
+def tg_send(chat_id, text, keyboard=None):
+    """Отправка сообщения в Telegram"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    if keyboard:
+        data["reply_markup"] = keyboard
+    try:
+        requests.post(url, json=data, timeout=5)
+    except Exception as e:
+        logger.error(f"Send error: {e}")
+
+def tg_edit(chat_id, msg_id, text, keyboard=None):
+    """Редактирование сообщения"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
+    data = {"chat_id": chat_id, "message_id": msg_id, "text": text, "parse_mode": "HTML"}
+    if keyboard:
+        data["reply_markup"] = keyboard
+    try:
+        requests.post(url, json=data, timeout=5)
+    except:
+        pass
+
+def show_main_menu(chat_id, msg_id=None):
+    """Показывает главное меню с кнопками"""
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "🚀 ЗАПУСТИТЬ", "callback_data": "start"}],
+            [{"text": "⏹️ ОСТАНОВИТЬ", "callback_data": "stop"}],
+            [{"text": "🔍 ПОКАЗАТЬ СПРЕДЫ", "callback_data": "show"}],
+            [{"text": "📊 СТАТУС", "callback_data": "status"}]
+        ]
+    }
+    
+    text = f"""
+🤖 <b>АРБИТРАЖНЫЙ СКАНЕР</b>
+
+📊 Монет: {len(BASE_COINS)}
+🏦 Бирж: {len(EXCHANGES)}
+💰 Min спред: 0.3%
+
+👇 Выберите действие:
+"""
+    if msg_id:
+        tg_edit(chat_id, msg_id, text, json.dumps(keyboard))
+    else:
+        tg_send(chat_id, text, json.dumps(keyboard))
+
+def run_telegram():
+    """Основной цикл Telegram бота"""
+    last_update_id = 0
     
     while True:
         try:
-            start_time = time.time()
+            # Получаем обновления
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+            resp = requests.get(url, params={"offset": last_update_id + 1, "timeout": 30})
+            data = resp.json()
             
-            # Получаем цены
-            prices = await fetch_all_prices()
-            
-            # Сохраняем данные для всех пользователей (анализ будет по запросу)
-            last_scan_data = {
-                "prices": prices,
-                "timestamp": time.time()
-            }
-            
-            elapsed = time.time() - start_time
-            logger.info(f"⚡ Данные обновлены за {elapsed:.1f} сек")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка в сканере: {e}")
-        
-        await asyncio.sleep(10)
-
-# ========= TELEGRAM БОТ =========
-def get_main_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("🚀 ЗАПУСТИТЬ УВЕДОМЛЕНИЯ", callback_data="start")],
-        [InlineKeyboardButton("⏹️ ОСТАНОВИТЬ УВЕДОМЛЕНИЯ", callback_data="stop")],
-        [InlineKeyboardButton("💰 ИЗМЕНИТЬ СУММУ", callback_data="change_amount")],
-        [InlineKeyboardButton("🎯 ИЗМЕНИТЬ MIN СПРЕД", callback_data="change_spread")],
-        [InlineKeyboardButton("📊 СТАТУС", callback_data="status")],
-        [InlineKeyboardButton("🔍 ПОКАЗАТЬ СПРЕДЫ СЕЙЧАС", callback_data="show_spreads")],
-        [InlineKeyboardButton("🏆 ТОП-10 ЛУЧШИХ СПРЕДОВ", callback_data="top_spreads")],
-        [InlineKeyboardButton("ℹ️ ПОМОЩЬ", callback_data="help")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-def get_amount_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("💵 $100", callback_data="amt_100"), InlineKeyboardButton("💵 $300", callback_data="amt_300"), InlineKeyboardButton("💵 $500", callback_data="amt_500")],
-        [InlineKeyboardButton("💵 $1000", callback_data="amt_1000"), InlineKeyboardButton("💵 $3000", callback_data="amt_3000"), InlineKeyboardButton("💵 $5000", callback_data="amt_5000")],
-        [InlineKeyboardButton("💵 $10000", callback_data="amt_10000"), InlineKeyboardButton("🔙 НАЗАД", callback_data="back")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-def get_spread_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("🎯 0.1%", callback_data="spread_01"), InlineKeyboardButton("🎯 0.2%", callback_data="spread_02"), InlineKeyboardButton("🎯 0.3%", callback_data="spread_03")],
-        [InlineKeyboardButton("🎯 0.5%", callback_data="spread_05"), InlineKeyboardButton("🎯 1.0%", callback_data="spread_10"), InlineKeyboardButton("🎯 2.0%", callback_data="spread_20")],
-        [InlineKeyboardButton("🔙 НАЗАД", callback_data="back")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
-    chat_id = update.effective_chat.id
-    
-    if chat_id not in USERS:
-        USERS[chat_id] = {
-            "active": False,
-            "settings": {"amount": 500, "min_spread": 0.3},
-            "last_alerts": {}
-        }
-    
-    # КЛАВИАТУРА С КНОПКАМИ
-    keyboard = [
-        [InlineKeyboardButton("🚀 ЗАПУСТИТЬ УВЕДОМЛЕНИЯ", callback_data="start")],
-        [InlineKeyboardButton("⏹️ ОСТАНОВИТЬ УВЕДОМЛЕНИЯ", callback_data="stop")],
-        [InlineKeyboardButton("💰 ИЗМЕНИТЬ СУММУ", callback_data="change_amount")],
-        [InlineKeyboardButton("🎯 ИЗМЕНИТЬ MIN СПРЕД", callback_data="change_spread")],
-        [InlineKeyboardButton("📊 СТАТУС", callback_data="status")],
-        [InlineKeyboardButton("🔍 ПОКАЗАТЬ СПРЕДЫ СЕЙЧАС", callback_data="show_spreads")],
-        [InlineKeyboardButton("🏆 ТОП-10 ЛУЧШИХ СПРЕДОВ", callback_data="top_spreads")],
-        [InlineKeyboardButton("ℹ️ ПОМОЩЬ", callback_data="help")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    welcome_text = f"""
-🤖 <b>АРБИТРАЖНЫЙ СКАНЕР</b>
-
-📊 <b>ХАРАКТЕРИСТИКИ:</b>
-• 🪙 Монет: <b>{len(BASE_COINS)}</b>
-• 🏦 Бирж: <b>{len(EXCHANGES)}</b> активных
-• 💰 Комиссии: биржевые + сетевые
-
-⚙️ <b>ТЕКУЩИЕ НАСТРОЙКИ:</b>
-• 💵 Сумма: <b>${USERS[chat_id]['settings']['amount']}</b>
-• 🎯 Min спред: <b>{USERS[chat_id]['settings']['min_spread']}%</b>
-
-👇 <b>ВЫБЕРИТЕ ДЕЙСТВИЕ:</b>
-    """
-    
-    await update.message.reply_text(
-        welcome_text,
-        parse_mode='HTML',
-        reply_markup=reply_markup
-    )
-async def send_notification(chat_id, opp, context):
-    """Отправляет уведомление пользователю"""
-    msg = f"""
-🚀 <b>СПРЕД НАЙДЕН!</b>
-
-💰 <b>{opp['coin']}/USDT</b>
-📊 Спред: <b>{opp['spread']:.2f}%</b>
-
-📈 <b>КУПИТЬ:</b> {opp['buy_exchange'].upper()} | ${opp['buy_price']:.6f}
-📉 <b>ПРОДАТЬ:</b> {opp['sell_exchange'].upper()} | ${opp['sell_price']:.6f}
-
-💸 <b>КОМИССИИ:</b>
-• Биржевые: {opp['buy_fee']:.2f}% + {opp['sell_fee']:.2f}%
-• Сетевая: <b>${opp['network_fee']:.2f}</b>
-• Время перевода: <b>{opp['transfer_time']} мин</b>
-
-✨ <b>РЕЗУЛЬТАТ:</b>
-💰 Чистая прибыль: <b>${opp['net_profit']:.2f}</b>
-📈 Доходность: <b>{opp['profit_percent']:.2f}%</b>
-💵 Объем торгов: <b>${opp['volume']:,.0f}</b>
-"""
-    try:
-        await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
-        logger.info(f"📨 Уведомление отправлено: {opp['coin']}")
-    except Exception as e:
-        logger.error(f"Ошибка отправки: {e}")
-
-async def check_and_notify_users(context):
-    """Проверяет данные и отправляет уведомления только активным пользователям"""
-    global last_scan_data
-    
-    if not last_scan_data["prices"]:
-        return
-    
-    for chat_id, user in USERS.items():
-        if not user.get("active", False):
-            continue
-        
-        opportunities = analyze_arbitrage(last_scan_data["prices"], user["settings"])
-        
-        for opp in opportunities[:5]:
-            key = f"{opp['coin']}_{opp['buy_exchange']}_{opp['sell_exchange']}"
-            now = time.time()
-            
-            if key in user["last_alerts"] and now - user["last_alerts"][key] < 300:
+            if not data.get("ok"):
                 continue
-            
-            user["last_alerts"][key] = now
-            await send_notification(chat_id, opp, context)
+                
+            for update in data.get("result", []):
+                last_update_id = update["update_id"]
+                
+                # Обработка обычных сообщений
+                msg = update.get("message")
+                if msg:
+                    chat_id = msg["chat"]["id"]
+                    text = msg.get("text", "")
+                    
+                    if chat_id not in USERS:
+                        USERS[chat_id] = {"active": False, "settings": {"amount": 500, "min_spread": 0.3}}
+                    
+                    if text == "/start":
+                        show_main_menu(chat_id)
+                
+                # Обработка нажатий на кнопки
+                callback = update.get("callback_query")
+                if callback:
+                    chat_id = callback["message"]["chat"]["id"]
+                    msg_id = callback["message"]["message_id"]
+                    data = callback["data"]
+                    
+                    if chat_id not in USERS:
+                        USERS[chat_id] = {"active": False, "settings": {"amount": 500, "min_spread": 0.3}}
+                    
+                    user = USERS[chat_id]
+                    
+                    if data == "start":
+                        user["active"] = True
+                        show_main_menu(chat_id, msg_id)
+                        tg_send(chat_id, "✅ Уведомления ВКЛЮЧЕНЫ!")
+                    
+                    elif data == "stop":
+                        user["active"] = False
+                        show_main_menu(chat_id, msg_id)
+                        tg_send(chat_id, "⏹️ Уведомления ВЫКЛЮЧЕНЫ!")
+                    
+                    elif data == "show":
+                        tg_send(chat_id, "🔍 Ищу спреды...")
+                        if last_prices:
+                            opps = find_opportunities(last_prices, user["settings"])
+                            if opps:
+                                for opp in opps[:5]:
+                                    msg = f"🚀 <b>{opp['coin']}</b>\n📈 {opp['buy']} → {opp['sell']}\n📊 Спред: {opp['spread']:.2f}%\n💰 Прибыль: ${opp['profit']:.2f}"
+                                    tg_send(chat_id, msg)
+                            else:
+                                tg_send(chat_id, "😴 Спредов нет")
+                        else:
+                            tg_send(chat_id, "🔄 Данные загружаются...")
+                        show_main_menu(chat_id)
+                    
+                    elif data == "status":
+                        active = "Да ✅" if user["active"] else "Нет ⏹️"
+                        status = f"📊 <b>СТАТУС</b>\n\n🟢 Активен: {active}\n💰 Сумма: ${user['settings']['amount']}\n🎯 Min спред: {user['settings']['min_spread']}%"
+                        tg_send(chat_id, status)
+                        show_main_menu(chat_id)
+                    
+                    # Отвечаем на callback
+                    requests.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+                        json={"callback_query_id": callback["id"]}
+                    )
+                    
+        except Exception as e:
+            logger.error(f"Telegram error: {e}")
+        
+        time.sleep(1)
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик нажатия кнопок"""
-    query = update.callback_query
+# ========= СКАНЕР =========
+async def scanner():
+    global last_prices
+    logger.info("🚀 Сканер запущен!")
     
-    # ВАЖНО: сначала отвечаем на callback
-    try:
-        await query.answer()
-    except:
-        pass
-    
-    chat_id = query.message.chat_id
-    data = query.data
-    
-    if chat_id not in USERS:
-        USERS[chat_id] = {
-            "active": False,
-            "settings": {"amount": 500, "min_spread": 0.3},
-            "last_alerts": {}
-        }
-    
-    user = USERS[chat_id]
-    
-    # Запуск уведомлений
-    if data == "start":
-        user["active"] = True
+    while True:
         try:
-            await query.edit_message_text(
-                "✅ <b>УВЕДОМЛЕНИЯ ВКЛЮЧЕНЫ!</b>\n\nЯ буду присылать спреды только когда они появятся.",
-                parse_mode='HTML',
-                reply_markup=get_main_keyboard()
-            )
-        except:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="✅ УВЕДОМЛЕНИЯ ВКЛЮЧЕНЫ!",
-                reply_markup=get_main_keyboard()
-            )
-    
-    # Остановка уведомлений
-    elif data == "stop":
-        user["active"] = False
-        try:
-            await query.edit_message_text(
-                "⏹️ <b>УВЕДОМЛЕНИЯ ВЫКЛЮЧЕНЫ!</b>",
-                parse_mode='HTML',
-                reply_markup=get_main_keyboard()
-            )
-        except:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="⏹️ УВЕДОМЛЕНИЯ ВЫКЛЮЧЕНЫ!",
-                reply_markup=get_main_keyboard()
-            )
-    
-    # Изменение суммы
-    elif data == "change_amount":
-        await query.edit_message_text(
-            "💰 <b>ВЫБЕРИТЕ СУММУ ТОРГОВЛИ:</b>",
-            parse_mode='HTML',
-            reply_markup=get_amount_keyboard()
-        )
-    
-    elif data.startswith("amt_"):
-        amount = int(data.replace("amt_", ""))
-        user["settings"]["amount"] = amount
-        await query.edit_message_text(
-            f"✅ <b>СУММА УСТАНОВЛЕНА: ${amount}</b>",
-            parse_mode='HTML',
-            reply_markup=get_main_keyboard()
-        )
-    
-    # Изменение спреда
-    elif data == "change_spread":
-        await query.edit_message_text(
-            "🎯 <b>ВЫБЕРИТЕ МИНИМАЛЬНЫЙ СПРЕД:</b>",
-            parse_mode='HTML',
-            reply_markup=get_spread_keyboard()
-        )
-    
-    elif data.startswith("spread_"):
-        spread = float(data.replace("spread_", "")) / 100
-        user["settings"]["min_spread"] = spread
-        await query.edit_message_text(
-            f"✅ <b>MIN СПРЕД УСТАНОВЛЕН: {spread}%</b>",
-            parse_mode='HTML',
-            reply_markup=get_main_keyboard()
-        )
-    
-    # Статус
-    elif data == "status":
-        status_text = f"""
-📊 <b>СТАТУС СКАНЕРА</b>
-
-🟢 <b>УВЕДОМЛЕНИЯ:</b> {'ВКЛЮЧЕНЫ ✅' if user['active'] else 'ВЫКЛЮЧЕНЫ ⏹️'}
-
-⚙️ <b>НАСТРОЙКИ:</b>
-• 💵 Сумма: <b>${user['settings']['amount']}</b>
-• 🎯 Min спред: <b>{user['settings']['min_spread']}%</b>
-
-📈 <b>ДАННЫЕ:</b>
-• 🪙 Монет: <b>{len(BASE_COINS)}</b>
-• 🏦 Бирж: <b>{len(EXCHANGES)}</b> активных
-"""
-        await query.edit_message_text(status_text, parse_mode='HTML', reply_markup=get_main_keyboard())
-    
-    # Показать спреды сейчас
-    elif data == "show_spreads":
-        await query.edit_message_text("🔍 <b>ИЩУ СПРЕДЫ...</b>", parse_mode='HTML')
-        
-        if not last_scan_data["prices"]:
-            await context.bot.send_message(chat_id, "🔄 Данные загружаются...")
-            return
-        
-        opportunities = analyze_arbitrage(last_scan_data["prices"], user["settings"])
-        
-        if opportunities:
-            result_text = "🔍 <b>НАЙДЕННЫЕ СПРЕДЫ (СЕЙЧАС)</b>\n\n"
-            for i, opp in enumerate(opportunities[:10], 1):
-                result_text += f"{i}. <b>{opp['coin']}/USDT</b>\n"
-                result_text += f"   📈 {opp['buy_exchange'].upper()} → {opp['sell_exchange'].upper()}\n"
-                result_text += f"   📊 Спред: {opp['spread']:.2f}%\n"
-                result_text += f"   💰 Прибыль: ${opp['net_profit']:.2f}\n\n"
+            prices = await fetch_prices()
+            last_prices = prices
             
-            await context.bot.send_message(chat_id, result_text, parse_mode='HTML', reply_markup=get_main_keyboard())
-        else:
-            await context.bot.send_message(chat_id, "😴 <b>СПРЕДОВ НЕ НАЙДЕНО</b>", parse_mode='HTML', reply_markup=get_main_keyboard())
-    
-    # Топ спредов
-    elif data == "top_spreads":
-        await query.edit_message_text("🏆 <b>ПОЛУЧАЮ ТОП-10 СПРЕДОВ...</b>", parse_mode='HTML')
-        
-        if not last_scan_data["prices"]:
-            await context.bot.send_message(chat_id, "🔄 Данные загружаются...")
-            return
-        
-        opportunities = analyze_arbitrage(last_scan_data["prices"], user["settings"])
-        
-        if opportunities:
-            top_text = "🏆 <b>ТОП-10 АРБИТРАЖНЫХ ВОЗМОЖНОСТЕЙ</b>\n\n"
-            for i, opp in enumerate(opportunities[:10], 1):
-                top_text += f"{i}. <b>{opp['coin']}/USDT</b>\n"
-                top_text += f"   📈 Спред: {opp['spread']:.2f}%\n"
-                top_text += f"   💰 Прибыль: ${opp['net_profit']:.2f}\n"
-                top_text += f"   🏦 {opp['buy_exchange'].upper()} → {opp['sell_exchange'].upper()}\n\n"
+            # Отправляем уведомления активным пользователям
+            for chat_id, user in USERS.items():
+                if user.get("active"):
+                    opps = find_opportunities(prices, user["settings"])
+                    for opp in opps[:3]:
+                        msg = f"🚀 <b>{opp['coin']}</b>\n📈 {opp['buy']} → {opp['sell']}\n📊 Спред: {opp['spread']:.2f}%\n💰 Прибыль: ${opp['profit']:.2f}"
+                        tg_send(chat_id, msg)
             
-            await context.bot.send_message(chat_id, top_text, parse_mode='HTML', reply_markup=get_main_keyboard())
-        else:
-            await context.bot.send_message(chat_id, "😴 <b>СПРЕДОВ НЕ НАЙДЕНО</b>", parse_mode='HTML', reply_markup=get_main_keyboard())
-    
-    elif data == "help":
-        help_text = """
-ℹ️ <b>ПОМОЩЬ ПО СКАНЕРУ</b>
-
-<b>🔍 КАК ЭТО РАБОТАЕТ:</b>
-Сканер каждые 10 секунд проверяет цены на 11 биржах.
-
-<b>📨 ПОЛУЧЕНИЕ СПРЕДОВ:</b>
-• <b>АВТОМАТИЧЕСКИ:</b> Нажмите "ЗАПУСТИТЬ УВЕДОМЛЕНИЯ"
-• <b>ВРУЧНУЮ:</b> Нажмите "ПОКАЗАТЬ СПРЕДЫ СЕЙЧАС"
-
-<b>💡 ЧТО УЧИТЫВАЕТСЯ:</b>
-• Комиссии бирж
-• Комиссии сети перевода
-• Время перевода
-• Ликвидность и объемы
-"""
-        await query.edit_message_text(help_text, parse_mode='HTML', reply_markup=get_main_keyboard())
-    
-    elif data == "back":
-        await query.edit_message_text("🏠 <b>ГЛАВНОЕ МЕНЮ</b>", parse_mode='HTML', reply_markup=get_main_keyboard())
-    
-    elif data == "help":
-        help_text = """
-ℹ️ <b>ПОМОЩЬ ПО СКАНЕРУ</b>
-
-<b>🔍 КАК ЭТО РАБОТАЕТ:</b>
-Сканер каждые 10 секунд проверяет цены на 11 биржах для 1000+ монет.
-
-<b>📨 ПОЛУЧЕНИЕ СПРЕДОВ:</b>
-• <b>АВТОМАТИЧЕСКИ:</b> Нажмите "ЗАПУСТИТЬ УВЕДОМЛЕНИЯ"
-• <b>ВРУЧНУЮ:</b> Нажмите "ПОКАЗАТЬ СПРЕДЫ СЕЙЧАС"
-
-<b>💡 ЧТО УЧИТЫВАЕТСЯ:</b>
-• Комиссии бирж (0.1-0.6%)
-• Комиссии сети перевода ($0.5-$5)
-• Время перевода (1-30 мин)
-• Ликвидность и объемы
-
-<b>⚙️ НАСТРОЙКИ:</b>
-1. Выберите сумму для торговли
-2. Выберите минимальный спред
-3. Включите уведомления
-        """
-        await query.edit_message_text(help_text, parse_mode='HTML', reply_markup=get_main_keyboard())
-    
-    elif data == "back":
-        await query.edit_message_text("🏠 <b>ГЛАВНОЕ МЕНЮ</b>", parse_mode='HTML', reply_markup=get_main_keyboard())
+            logger.info("✅ Сканирование завершено")
+        except Exception as e:
+            logger.error(f"Ошибка сканера: {e}")
+        
+        await asyncio.sleep(15)
 
 # ========= ЗАПУСК =========
 async def main():
-    # Инициализируем биржи
     await init_exchanges()
     
-    # Запускаем веб-сервер для автопинга
-    threading.Thread(target=run_web_server, daemon=True).start()
+    # Запускаем веб-сервер для Render
+    threading.Thread(target=run_web, daemon=True).start()
     threading.Thread(target=keep_alive, daemon=True).start()
     
-    logger.info("=" * 60)
-    logger.info("🚀 ПРОФЕССИОНАЛЬНЫЙ АРБИТРАЖНЫЙ СКАНЕР")
-    logger.info("=" * 60)
-    logger.info(f"📊 МОНЕТ: {len(BASE_COINS)}")
-    logger.info(f"🏦 БИРЖ: {len(EXCHANGES)} из {len(EXCHANGES_LIST)}")
-    logger.info(f"🔄 АВТОПИНГ: активен (каждые 5 минут)")
-    logger.info("=" * 60)
+    # Запускаем Telegram бота
+    threading.Thread(target=run_telegram, daemon=True).start()
     
-    # Запускаем фоновый сканер
-    asyncio.create_task(background_scanner())
+    logger.info("=" * 50)
+    logger.info("🚀 АРБИТРАЖНЫЙ СКАНЕР ЗАПУЩЕН")
+    logger.info(f"📊 Монет: {len(BASE_COINS)}")
+    logger.info(f"🏦 Бирж: {len(EXCHANGES)}")
+    logger.info("=" * 50)
     
-    # Создаем приложение Telegram
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # Регистрируем обработчики
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    
-    # Запускаем проверку уведомлений
-    async def notification_loop():
-        while True:
-            await check_and_notify_users(app)
-            await asyncio.sleep(10)
-    
-    asyncio.create_task(notification_loop())
-    
-    # Запускаем бота (ИСПРАВЛЕНО!)
-    await app.initialize()
-    await app.start()
-    
-    # Вместо app.updater.idle() используем бесконечный цикл
-    logger.info("✅ Telegram бот запущен! Ожидание сообщений...")
-    
-    # Бесконечный цикл, чтобы бот работал
-    try:
-        while True:
-            await asyncio.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("🛑 Остановка по Ctrl+C")
-        await app.stop()
-        await app.shutdown()
+    await scanner()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("🛑 Остановка")
+    asyncio.run(main())
