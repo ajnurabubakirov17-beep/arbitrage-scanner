@@ -543,17 +543,19 @@ async def main():
     
     asyncio.create_task(notification_loop())
     
-    # Запускаем бота (исправлено!)
+    # Запускаем бота (ИСПРАВЛЕНО!)
     await app.initialize()
     await app.start()
     
     # Вместо app.updater.idle() используем бесконечный цикл
-    print("✅ Telegram бот запущен! Ожидание...")
+    logger.info("✅ Telegram бот запущен! Ожидание сообщений...")
+    
+    # Бесконечный цикл, чтобы бот работал
     try:
         while True:
             await asyncio.sleep(1)
     except KeyboardInterrupt:
-        print("🛑 Остановка...")
+        logger.info("🛑 Остановка по Ctrl+C")
         await app.stop()
         await app.shutdown()
 
