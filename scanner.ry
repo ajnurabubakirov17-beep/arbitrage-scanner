@@ -523,7 +523,6 @@ async def main():
     logger.info(f"📊 МОНЕТ: {len(BASE_COINS)}")
     logger.info(f"🏦 БИРЖ: {len(EXCHANGES)} из {len(EXCHANGES_LIST)}")
     logger.info(f"🔄 АВТОПИНГ: активен (каждые 5 минут)")
-    logger.info(f"📨 УВЕДОМЛЕНИЯ: только по запросу пользователя")
     logger.info("=" * 60)
     
     # Запускаем фоновый сканер
@@ -536,7 +535,7 @@ async def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    # Запускаем проверку уведомлений каждые 10 секунд
+    # Запускаем проверку уведомлений
     async def notification_loop():
         while True:
             await check_and_notify_users(app)
@@ -544,11 +543,22 @@ async def main():
     
     asyncio.create_task(notification_loop())
     
-    # Запускаем бота
+    # Запускаем бота (исправлено!)
     await app.initialize()
     await app.start()
-    await app.updater.start_polling()
-    await app.updater.idle()
+    
+    # Вместо app.updater.idle() используем бесконечный цикл
+    print("✅ Telegram бот запущен! Ожидание...")
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        print("🛑 Остановка...")
+        await app.stop()
+        await app.shutdown()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 Остановка")
