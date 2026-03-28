@@ -2,197 +2,270 @@ import asyncio
 import ccxt.async_support as ccxt
 import logging
 import time
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import json
+import websockets
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ========= CONFIG =========
-TELEGRAM_TOKEN = "YOUR_TOKEN_HERE"
-SCAN_INTERVAL = 10  # сек
-TOP_EXCHANGES = ["binance", "bybit", "okx", "kucoin", "gateio", "huobi", "mexc", "bitget",
-                 "kraken", "coinbase", "bitfinex", "bitstamp", "poloniex", "bittrex", "ascendex"]
+TELEGRAM_TOKEN = "YOUR_TOKEN"
 
-TRADE_AMOUNTS = [50, 100, 500, 1000, 5000, 10000]
+EXCHANGES_LIST = ["binance", "bybit", "okx", "kucoin"]
+BASE_COINS = ["BTC","ETH","SOL","XRP","BNB","ADA","DOGE","LINK","MATIC","LTC"]
 
-# ========= LOGGING =========
+# комиссии бирж
+FEES = {
+    "binance": 0.001,
+    "bybit": 0.001,
+    "okx": 0.001,
+    "kucoin": 0.001
+}
+
+# комиссия сети
+NETWORK_FEES = {
+    "BTC": 5,
+    "ETH": 3,
+    "USDT": 1,
+    "DEFAULT": 2
+}
+
+# ========= STATE =========
+USERS = {}
+EXCHANGES = {}
+BINANCE_WS = {}
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========= GLOBALS =========
-EXCHANGES = {}
-FEES = {}
-TOP_COINS = []  # загружается из CoinGecko
-USERS = {}  # {chat_id: {"active":bool, "settings": {...}, "last_alerts":{}}}
-
-# ========= HELPER FUNCTIONS =========
-def get_main_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("🚀 Запустить сканер", callback_data="start")],
-        [InlineKeyboardButton("⏹️ Остановить сканер", callback_data="stop")],
-        [InlineKeyboardButton("⚙️ Настройки", callback_data="settings")],
-        [InlineKeyboardButton("📊 Топ спредов", callback_data="top_spreads")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-# ========= INIT EXCHANGES =========
+# ========= INIT =========
 async def init_exchanges():
-    global EXCHANGES, FEES
-    for name in TOP_EXCHANGES:
+    for name in EXCHANGES_LIST:
         try:
             ex = getattr(ccxt, name)({"enableRateLimit": True})
             await ex.load_markets()
             EXCHANGES[name] = ex
-            FEES[name] = ex.fees.get("trading", {}).get("maker", 0.001)
-            logger.info(f"Loaded {name} with fee {FEES[name]*100}%")
+            logger.info(f"✅ {name}")
         except Exception as e:
-            logger.warning(f"Cannot load {name}: {e}")
+            logger.warning(e)
 
-# ========= FETCH PRICES =========
-SEM = asyncio.Semaphore(5)  # ограничение параллелизма
+# ========= WS =========
+async def binance_ws():
+    stream = "/".join([f"{c.lower()}usdt@bookTicker" for c in BASE_COINS])
+    url = f"wss://stream.binance.com:9443/stream?streams={stream}"
 
-async def fetch_prices(exchange_name, exchange, coins):
-    async with SEM:
-        data = {}
+    while True:
         try:
-            symbols = [f"{c}/USDT" for c in coins if f"{c}/USDT" in exchange.symbols]
-            tickers = await exchange.fetch_tickers(symbols)
-            for sym, t in tickers.items():
-                coin = sym.split("/")[0]
-                ask = t.get("ask")
-                bid = t.get("bid")
-                vol = t.get("quoteVolume", 0)
-                if ask and bid and vol > 0:
-                    data[coin] = {"ask": ask, "bid": bid, "volume": vol}
-            return exchange_name, data
-        except Exception as e:
-            logger.warning(f"{exchange_name} fetch error: {e}")
-            return exchange_name, {}
+            async with websockets.connect(url) as ws:
+                async for msg in ws:
+                    data = json.loads(msg)["data"]
+                    coin = data["s"].replace("USDT","")
+                    BINANCE_WS[coin] = {
+                        "bid": float(data["b"]),
+                        "ask": float(data["a"])
+                    }
+        except:
+            await asyncio.sleep(5)
 
-async def get_all_prices(coins):
-    tasks = [fetch_prices(name, ex, coins) for name, ex in EXCHANGES.items()]
-    results = await asyncio.gather(*tasks)
-    all_prices = {}
-    for name, data in results:
-        for coin, p in data.items():
-            all_prices.setdefault(coin, {})[name] = p
-    return all_prices
+# ========= ORDERBOOK =========
+async def get_orderbook(ex, symbol):
+    try:
+        return await ex.fetch_order_book(symbol, limit=10)
+    except:
+        return None
+
+def calc_fill(orderbook, usd, side="buy"):
+    total = 0
+    coins = 0
+
+    orders = orderbook["asks"] if side=="buy" else orderbook["bids"]
+
+    for price, volume in orders:
+        value = price * volume
+        if total + value >= usd:
+            remain = usd - total
+            coins += remain / price
+            break
+        else:
+            total += value
+            coins += volume
+
+    return coins
+
+# ========= FETCH =========
+async def fetch_prices():
+    result = {}
+
+    for name, ex in EXCHANGES.items():
+        try:
+            for coin in BASE_COINS:
+                symbol = f"{coin}/USDT"
+                if symbol not in ex.symbols:
+                    continue
+
+                ticker = await ex.fetch_ticker(symbol)
+                if ticker["quoteVolume"] < 100000:
+                    continue
+
+                ob = await get_orderbook(ex, symbol)
+                if not ob:
+                    continue
+
+                result.setdefault(coin, {})[name] = {
+                    "ticker": ticker,
+                    "orderbook": ob
+                }
+
+        except Exception as e:
+            logger.warning(e)
+
+    return result
 
 # ========= ANALYSIS =========
-def analyze_opportunities(all_prices, user_settings):
-    min_profit = user_settings.get("min_profit", 0.1)
-    selected_coins = user_settings.get("coins", TOP_COINS)
-    selected_exchanges = user_settings.get("exchanges", TOP_EXCHANGES)
-    trade_amounts = user_settings.get("amounts", TRADE_AMOUNTS)
-    
+def analyze(data, settings):
     opps = []
-    for coin, prices in all_prices.items():
-        if coin not in selected_coins:
-            continue
-        exchanges = {ex: prices[ex] for ex in prices if ex in selected_exchanges}
+
+    for coin, exchanges in data.items():
+
+        if coin in BINANCE_WS:
+            exchanges["binance"] = {
+                "ticker": BINANCE_WS[coin],
+                "orderbook": None
+            }
+
         if len(exchanges) < 2:
             continue
+
         for buy_ex, b in exchanges.items():
             for sell_ex, s in exchanges.items():
                 if buy_ex == sell_ex:
                     continue
-                spread = (s["bid"] - b["ask"]) / b["ask"] * 100
-                if spread < min_profit:
+
+                ask = b["ticker"]["ask"]
+                bid = s["ticker"]["bid"]
+
+                if not ask or not bid:
                     continue
+
+                spread = (bid - ask) / ask * 100
+                if spread < settings["min_spread"]:
+                    continue
+
+                # расчет
+                amount = settings["amount"]
+
+                if b["orderbook"] and s["orderbook"]:
+                    coins = calc_fill(b["orderbook"], amount, "buy")
+                    usd_back = calc_fill(s["orderbook"], amount, "sell") * bid
+                else:
+                    coins = amount / ask
+                    usd_back = coins * bid
+
                 fee = FEES.get(buy_ex,0.001)+FEES.get(sell_ex,0.001)
-                for amt in trade_amounts:
-                    coins_bought = amt / b["ask"]
-                    profit = coins_bought * s["bid"] * (1-fee) - amt
-                    if profit>0:
-                        opps.append({
-                            "coin": coin,
-                            "buy": buy_ex,
-                            "sell": sell_ex,
-                            "spread": spread,
-                            "profit": profit,
-                            "amount": amt
-                        })
+                net_fee = NETWORK_FEES.get(coin, NETWORK_FEES["DEFAULT"])
+
+                profit = usd_back * (1-fee) - amount - net_fee
+
+                if profit > 0:
+                    opps.append({
+                        "coin": coin,
+                        "buy": buy_ex,
+                        "sell": sell_ex,
+                        "spread": spread,
+                        "profit": profit
+                    })
+
     return sorted(opps, key=lambda x: x["profit"], reverse=True)
 
 # ========= TELEGRAM =========
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚀 Старт", callback_data="start")],
+        [InlineKeyboardButton("⛔ Стоп", callback_data="stop")],
+        [InlineKeyboardButton("💰 Сумма +", callback_data="amt_up")],
+        [InlineKeyboardButton("💰 Сумма -", callback_data="amt_down")],
+    ])
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     USERS[chat_id] = {
         "active": True,
-        "settings": {
-            "min_profit": 0.2,
-            "coins": TOP_COINS[:50],
-            "exchanges": TOP_EXCHANGES[:10],
-            "amounts": TRADE_AMOUNTS
-        },
-        "last_alerts": {}
+        "last": {},
+        "settings": {"min_spread": 0.5, "amount": 300}
     }
-    await update.message.reply_text("Сканер запущен!", reply_markup=get_main_keyboard())
+    await update.message.reply_text("PRO MAX активен", reply_markup=keyboard())
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    chat_id = query.message.chat_id
-    data = query.data
-    user = USERS.get(chat_id, {"active": False, "settings": {}})
-    
-    if data=="start":
-        user["active"]=True
-        await query.edit_message_text("Сканер активен ✅", reply_markup=get_main_keyboard())
-    elif data=="stop":
-        user["active"]=False
-        await query.edit_message_text("Сканер остановлен ⏹️", reply_markup=get_main_keyboard())
-    elif data=="top_spreads":
-        await query.edit_message_text("Сканирую...", reply_markup=get_main_keyboard())
-        prices = await get_all_prices(user["settings"]["coins"])
-        opps = analyze_opportunities(prices,user["settings"])
-        if opps:
-            msg = "🔥 ТОП АРБИТРАЖНЫХ ВОЗМОЖНОСТЕЙ\n\n"
-            for o in opps[:5]:
-                msg += f"{o['coin']}: {o['buy']}→{o['sell']} | Profit: ${o['profit']:.2f} | Spread: {o['spread']:.2f}%\n"
-            await query.edit_message_text(msg, reply_markup=get_main_keyboard())
-        else:
-            await query.edit_message_text("Нет возможностей 😴", reply_markup=get_main_keyboard())
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
 
-# ========= SCANNER LOOP =========
-async def scanner_loop(app: Application):
+    user = USERS[q.message.chat_id]
+
+    if q.data == "start":
+        user["active"] = True
+    elif q.data == "stop":
+        user["active"] = False
+    elif q.data == "amt_up":
+        user["settings"]["amount"] += 100
+    elif q.data == "amt_down":
+        user["settings"]["amount"] -= 100
+
+    await q.edit_message_text(
+        f"Статус: {user['active']}\nСумма: ${user['settings']['amount']}",
+        reply_markup=keyboard()
+    )
+
+# ========= LOOP =========
+async def scanner(app):
     while True:
-        for chat_id, user in USERS.items():
-            if not user.get("active", False):
-                continue
-            try:
-                prices = await get_all_prices(user["settings"]["coins"])
-                opps = analyze_opportunities(prices, user["settings"])
-                for o in opps[:5]:
+        try:
+            data = await fetch_prices()
+
+            for chat_id, user in USERS.items():
+                if not user["active"]:
+                    continue
+
+                opps = analyze(data, user["settings"])
+
+                for o in opps[:3]:
                     key = f"{o['coin']}_{o['buy']}_{o['sell']}"
                     now = time.time()
-                    if key in user["last_alerts"] and now-user["last_alerts"][key]<300:
+
+                    if key in user["last"] and now - user["last"][key] < 300:
                         continue
-                    user["last_alerts"][key]=now
-                    msg = f"🚀 {o['coin']}\nBUY:{o['buy']} SELL:{o['sell']}\nProfit:${o['profit']:.2f} Spread:{o['spread']:.2f}%\nAmount:${o['amount']}"
-                    await app.bot.send_message(chat_id,msg)
-            except Exception as e:
-                logger.warning(f"Scanner error: {e}")
-        await asyncio.sleep(SCAN_INTERVAL)
+
+                    user["last"][key] = now
+
+                    msg = (
+                        f"🚀 {o['coin']}\n"
+                        f"{o['buy']} → {o['sell']}\n"
+                        f"Spread: {o['spread']:.2f}%\n"
+                        f"Profit: ${o['profit']:.2f}"
+                    )
+
+                    await app.bot.send_message(chat_id, msg)
+
+        except Exception as e:
+            logger.error(e)
+
+        await asyncio.sleep(5)
 
 # ========= MAIN =========
 async def main():
-    global TOP_COINS
-    # Загружаем топ монет (здесь можно заменить на CoinGecko API)
-    TOP_COINS = ["BTC","ETH","SOL","XRP","BNB","ADA","DOGE","LTC","LINK","UNI","MATIC","AAVE","TRX","USDT","USDC"]
-    
     await init_exchanges()
-    
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    
-    # запускаем цикл сканера
-    asyncio.create_task(scanner_loop(app))
-    
-    # запускаем Telegram
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(buttons))
+
+    asyncio.create_task(binance_ws())
+    asyncio.create_task(scanner(app))
+
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
     await app.updater.idle()
 
-if __name__=="__main__":
+if __name__ == "__main__":
     asyncio.run(main())
