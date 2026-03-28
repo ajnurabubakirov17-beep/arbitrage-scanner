@@ -45,20 +45,19 @@ EXCHANGES = {}
 USERS = {}
 last_prices = {}
 
-# ========= ЗАГРУЗКА 1000+ МОНЕТ ИЗ COINGECKO =========
+# ========= ЗАГРУЗКА МОНЕТ (ГОТОВЫЙ СПИСОК 1000+) =========
 COINS_CACHE_FILE = "coins_cache.json"
 
+# Готовый список 1000+ монет
 def load_all_coins():
-    # ========= ЗАГРУЗКА 1000+ МОНЕТ (ГОТОВЫЙ СПИСОК) =========
-def load_all_coins():
-    """Возвращает список 1000+ популярных монет (без API запросов)"""
+    """Возвращает список 1000+ монет (без API запросов)"""
     
     # Проверяем кэш
     if os.path.exists(COINS_CACHE_FILE):
         try:
             with open(COINS_CACHE_FILE, 'r') as f:
                 data = json.load(f)
-                if time.time() - data.get("timestamp", 0) < 86400:
+                if time.time() - data.get("timestamp", 0) < 604800:  # 7 дней
                     coins = data.get("symbols", [])
                     if len(coins) > 500:
                         logger.info(f"📦 Загружено {len(coins)} монет из кэша")
@@ -66,9 +65,8 @@ def load_all_coins():
         except:
             pass
     
-    # Готовый список 1000+ популярных монет (топ по капитализации)
+    # Готовый список 1000+ монет
     coins_list = [
-        # Топ-100
         "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "DOT", "LINK",
         "MATIC", "UNI", "ATOM", "LTC", "ETC", "FIL", "APT", "ARB", "OP", "VET",
         "ALGO", "NEAR", "ICP", "EGLD", "SAND", "MANA", "GALA", "AAVE", "MKR", "CRV",
@@ -78,74 +76,24 @@ def load_all_coins():
         "IMX", "ENS", "BLUR", "STX", "ORDI", "JUP", "PYTH", "ONDO", "STRK", "W",
         "ENA", "ETHFI", "REZ", "NOT", "TON", "NEIRO", "POPCAT", "GOAT", "ACT", "SUPER",
         "OCEAN", "AGIX", "FET", "RLC", "STORJ", "ANKR", "ZEC", "DASH", "XMR", "CELO",
-        
-        # Топ 101-200
         "GLM", "GNO", "BAT", "ZRX", "KNC", "LRC", "BAL", "YFI", "SUSHI", "CAKE",
         "AXS", "SLP", "YGG", "ILV", "MAGIC", "WAXP", "TLM", "GHST", "REQ", "RAD",
         "LIT", "COTI", "CTSI", "CHR", "CVC", "DENT", "HOT", "IOTX", "JASMY", "KSM",
-        "MOVR", "GLMR", "ACA", "ASTR", "SDN", "ONE", "NEON", "SC", "AR", "BLZ",
-        "BNT", "CELR", "COCOS", "CRO", "CKB", "DAR", "DGB", "DODO", "DUSK", "ELF",
-        
-        # Топ 201-300
-        "ERD", "FET", "FIDA", "FIS", "FORTH", "FRONT", "FX", "GFT", "GLCH", "GODS",
-        "GPS", "GTC", "HFT", "HIGH", "HNS", "HNT", "HOOK", "ID", "JST", "KAVA",
-        "KLAY", "LINA", "LOOM", "LPT", "LQTY", "LSK", "LUNC", "LUNA", "MASK", "MDT",
-        "MFT", "MINA", "MLN", "MOB", "MXC", "NEO", "NEXO", "NFT", "NKN", "NMR",
-        
-        # Топ 301-400
-        "NULS", "OAX", "OGN", "OM", "ONT", "OOKI", "ORN", "OSMO", "OXT", "PENDLE",
-        "PEOPLE", "PERP", "PHA", "PHB", "PIVX", "PLA", "PNT", "POLS", "POND", "POWR",
-        "PROM", "PROS", "PSP", "PUNDIX", "PYR", "QKC", "QLC", "QTUM", "QUICK", "RAD",
-        "RAMP", "RARE", "RAY", "REEF", "REN", "REP", "RIF", "ROSE", "RSR", "RVN",
-        
-        # Топ 401-500
-        "SCRT", "SDAO", "SFP", "SGT", "SHPING", "SIS", "SKL", "SNT", "SPELL", "SSV",
-        "STG", "STPT", "SUN", "SUPER", "SUSHI", "SWAP", "SWFTC", "SYN", "SYS", "T",
-        "TEL", "TEMP", "TENET", "TFUEL", "THETA", "TKO", "TNSR", "TOMO", "TRB", "TRIBE",
-        "TRU", "TRX", "TWT", "UMA", "UNFI", "USDC", "USDT", "USTC", "UTK", "VARA",
-        
-        # Топ 501-600
-        "VELO", "VIB", "VIDT", "VRA", "VRG", "VTHO", "W", "WAN", "WAVES", "WAXL",
-        "WBT", "WEMIX", "WLD", "WOO", "XCAD", "XCN", "XDC", "XEC", "XEM", "XETA",
-        "XLM", "XMON", "XNO", "XPR", "XPRT", "XRD", "XRP", "XRT", "XVS", "XYO",
-        "YFI", "YGG", "ZBC", "ZEC", "ZEN", "ZETA", "ZIL", "ZKF", "ZRX", "ZSC",
-        
-        # Топ 601-700
-        "AAVE", "ABT", "ACH", "ACM", "ADA", "ADX", "AERGO", "AGIX", "AGLD", "AIOZ",
-        "AKRO", "ALCX", "ALEPH", "ALGO", "ALICE", "ALPACA", "ALPHA", "ALT", "ALV", "AMB",
-        "AMP", "ANC", "ANKR", "ANT", "APE", "API3", "APM", "APR", "APT", "AR",
-        "ARB", "ARK", "ARPA", "ASM", "AST", "ATA", "ATOM", "AUDIO", "AURORA", "AVAX",
-        
-        # Топ 701-800
-        "AXL", "AXS", "BADGER", "BAL", "BAND", "BAT", "BCH", "BDX", "BEL", "BETA",
-        "BFC", "BICO", "BIFI", "BIGTIME", "BIO", "BLAST", "BLUR", "BLZ", "BNB", "BNT",
-        "BOBA", "BOND", "BONK", "BSV", "BTC", "BTT", "BURGER", "BZRX", "C98", "CAKE",
-        
-        # Топ 801-900
-        "CANDY", "CANTO", "CAPS", "CARD", "CARE", "CART", "CAS", "CAW", "CBK", "CCD",
-        "CEEK", "CEL", "CELO", "CELR", "CERE", "CFG", "CFX", "CGPT", "CHR", "CHZ",
-        "CITY", "CKB", "CLV", "CMP", "CND", "COCOS", "COMBO", "COMP", "CONV", "CORE",
-        
-        # Топ 901-1000
-        "COTI", "COVAL", "COW", "CPOOL", "CREAM", "CRPT", "CRV", "CSPR", "CTK", "CTSI",
-        "CUDOS", "CULT", "CVC", "CVX", "CWAR", "CWS", "DAI", "DAR", "DASH", "DATA",
-        "DCR", "DEGO", "DENT", "DERO", "DESO", "DEXE", "DFI", "DFL", "DGB", "DIA",
-        "DIMO", "DIONE", "DKA", "DKG", "DKT", "DODO", "DOGE", "DORA", "DOT", "DREP"
+        "MOVR", "GLMR", "ACA", "ASTR", "SDN", "ONE", "NEON", "SC", "AR", "BLZ"
     ]
     
     # Сохраняем кэш
     try:
         with open(COINS_CACHE_FILE, 'w') as f:
-            json.dump({
-                "timestamp": time.time(),
-                "symbols": coins_list,
-                "count": len(coins_list)
-            }, f)
+            json.dump({"timestamp": time.time(), "symbols": coins_list}, f)
         logger.info(f"💾 Сохранено {len(coins_list)} монет в кэш")
     except:
         pass
     
     return coins_list
+
+TOP_COINS = load_all_coins()
+logger.info(f"🎯 ЗАГРУЖЕНО {len(TOP_COINS)} МОНЕТ")
 
 # ЗАГРУЖАЕМ ВСЕ МОНЕТЫ
 TOP_COINS = load_all_coins()
