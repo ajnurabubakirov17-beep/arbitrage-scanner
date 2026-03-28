@@ -284,6 +284,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "last_alerts": {}
         }
     
+    # КЛАВИАТУРА С КНОПКАМИ
+    keyboard = [
+        [InlineKeyboardButton("🚀 ЗАПУСТИТЬ УВЕДОМЛЕНИЯ", callback_data="start")],
+        [InlineKeyboardButton("⏹️ ОСТАНОВИТЬ УВЕДОМЛЕНИЯ", callback_data="stop")],
+        [InlineKeyboardButton("💰 ИЗМЕНИТЬ СУММУ", callback_data="change_amount")],
+        [InlineKeyboardButton("🎯 ИЗМЕНИТЬ MIN СПРЕД", callback_data="change_spread")],
+        [InlineKeyboardButton("📊 СТАТУС", callback_data="status")],
+        [InlineKeyboardButton("🔍 ПОКАЗАТЬ СПРЕДЫ СЕЙЧАС", callback_data="show_spreads")],
+        [InlineKeyboardButton("🏆 ТОП-10 ЛУЧШИХ СПРЕДОВ", callback_data="top_spreads")],
+        [InlineKeyboardButton("ℹ️ ПОМОЩЬ", callback_data="help")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     welcome_text = f"""
 🤖 <b>АРБИТРАЖНЫЙ СКАНЕР</b>
 
@@ -302,9 +315,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         welcome_text,
         parse_mode='HTML',
-        reply_markup=get_main_keyboard()
+        reply_markup=reply_markup
     )
-
 async def send_notification(chat_id, opp, context):
     """Отправляет уведомление пользователю"""
     msg = f"""
