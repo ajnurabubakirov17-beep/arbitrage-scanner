@@ -185,6 +185,160 @@ def generate_spread_chart(coin=None):
     plt.close()
     return buf
 
+# ========= ПЛАТЁЖНАЯ СИСТЕМА И ПОДПИСКА =========
+SUBSCRIBERS_FILE = "subscribers.json"
+TRIAL_DAYS = 1
+SUBSCRIPTION_PRICE = 15
+
+def load_subscribers():
+    if os.path.exists(SUBSCRIBERS_FILE):
+        try:
+            with open(SUBSCRIBERS_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            pass
+    return {}
+
+def save_subscribers(data):
+    with open(SUBSCRIBERS_FILE, 'w') as f:
+        json.dump(data, f)
+
+def get_user_subscription(chat_id):
+    subs = load_subscribers()
+    if str(chat_id) in subs:
+        return subs[str(chat_id)]
+    return {"paid_until": 0, "trial_used": False}
+
+def update_user_subscription(chat_id, paid_until, trial_used=False):
+    subs = load_subscribers()
+    subs[str(chat_id)] = {"paid_until": paid_until, "trial_used": trial_used}
+    save_subscribers(subs)
+
+def check_subscription(chat_id):
+    sub = get_user_subscription(chat_id)
+    return sub.get("paid_until", 0) > time.time()
+
+def activate_trial(chat_id):
+    sub = get_user_subscription(chat_id)
+    if not sub.get("trial_used", False):
+        update_user_subscription(chat_id, int(time.time()) + (TRIAL_DAYS * 86400), True)
+        return True
+    return False
+
+def get_subscription_status_text(chat_id):
+    sub = get_user_subscription(chat_id)
+    paid_until = sub.get("paid_until", 0)
+    trial_used = sub.get("trial_used", False)
+    if paid_until > time.time():
+        days_left = int((paid_until - time.time()) / 86400)
+        return f"✅ Активна до: {datetime.fromtimestamp(paid_until).strftime('%d.%m.%Y')} (осталось {days_left} дн.)"
+    elif trial_used:
+        return "⏰ Пробный период закончился. Оформите подписку!"
+    else:
+        return "🎁 Доступен пробный период 1 день!"
+
+def generate_payment_link(chat_id):
+    return f"https://t.me/CryptoBot?start=pay_{chat_id}_{int(time.time())}"
+
+def show_subscription_menu(chat_id):
+    has_subscription = check_subscription(chat_id)
+    sub_status = get_subscription_status_text(chat_id)
+    if has_subscription:
+        text = f"💎 <b>ВАША ПОДПИСКА АКТИВНА</b>\n\n{sub_status}\n\nСпасибо, что пользуетесь сканером!"
+        keyboard = {"inline_keyboard": [[{"text": "🔙 НАЗАД", "callback_data": "back"}]]}
+        send_message(chat_id, text, json.dumps(keyboard))
+        return
+    sub = get_user_subscription(chat_id)
+    trial_used = sub.get("trial_used", False)
+    if not trial_used:
+        text = f"🎁 <b>ПРОБНЫЙ ПЕРИОД 1 ДЕНЬ</b>\n\nБесплатный тест сканера!\n\nПосле пробного периода подписка стоит ${SUBSCRIPTION_PRICE} USDT/мес\n\n👇 ВЫБЕРИТЕ:"
+        keyboard = {"inline_keyboard": [[{"text": "🎁 АКТИВИРОВАТЬ ПРОБНЫЙ ПЕРИОД", "callback_data": "trial_activate"}], [{"text": "💳 ОФОРМИТЬ ПОДПИСКУ", "callback_data": "subscribe"}], [{"text": "🔙 НАЗАД", "callback_data": "back"}]]}
+    else:
+        text = f"💎 <b>ОФОРМЛЕНИЕ ПОДПИСКИ</b>\n\nПробный период использован.\n\n💰 Стоимость: ${SUBSCRIPTION_PRICE} USDT/мес\n\n👇 НАЖМИТЕ ДЛЯ ОПЛАТЫ:"
+        keyboard = {"inline_keyboard": [[{"text": "💳 ОПЛАТИТЬ USDT", "callback_data": "subscribe"}], [{"text": "🔙 НАЗАД", "callback_data": "back"}]]}
+    send_message(chat_id, text, json.dumps(keyboard))
+
+# ========= РЕФЕРАЛЬНАЯ СИСТЕМА =========
+REFERRALS_FILE = "referrals.json"
+REFERRAL_REWARD_PERCENT = 20
+REFERRAL_BONUS_NEW_USER = 5
+
+def load_referrals():
+    if os.path.exists(REFERRALS_FILE):
+        try:
+            with open(REFERRALS_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            pass
+    return {}
+
+def save_referrals(data):
+    with open(REFERRALS_FILE, 'w') as f:
+        json.dump(data, f)
+
+def get_user_referral_info(chat_id):
+    refs = load_referrals()
+    if str(chat_id) in refs:
+        return refs[str(chat_id)]
+    return {"referred_by": None, "referrals": [], "earnings": 0}
+
+def add_referral(chat_id, referrer_id):
+    refs = load_referrals()
+    if str(referrer_id) not in refs:
+        refs[str(referrer_id)] = {"referred_by": None, "referrals": [], "earnings": 0}
+    if str(chat_id) not in refs:
+        refs[str(chat_id)] = {"referred_by": referrer_id, "referrals": [], "earnings": 0}
+    if chat_id not in refs[str(referrer_id)]["referrals"]:
+        refs[str(referrer_id)]["referrals"].append(chat_id)
+    save_referrals(refs)
+
+def add_referral_earnings(referrer_id, amount):
+    refs = load_referrals()
+    if str(referrer_id) in refs:
+        refs[str(referrer_id)]["earnings"] += amount
+        save_referrals(refs)
+
+def generate_referral_link(chat_id):
+    return f"https://t.me/Scanner_AD01_bot?start=ref_{chat_id}"
+
+def show_referral_menu(chat_id):
+    ref_info = get_user_referral_info(chat_id)
+    referral_link = generate_referral_link(chat_id)
+    total_referrals = len(ref_info.get("referrals", []))
+    total_earnings = ref_info.get("earnings", 0)
+    referrals_list = ""
+    if total_referrals > 0:
+        referrals_list = "\n👥 <b>Ваши рефералы:</b>\n"
+        for ref_id in ref_info.get("referrals", [])[:10]:
+            try:
+                user_info = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getChat", params={"chat_id": ref_id}).json()
+                name = user_info.get("result", {}).get("first_name", str(ref_id))
+            except:
+                name = str(ref_id)
+            referrals_list += f"• {name}\n"
+        if total_referrals > 10:
+            referrals_list += f"... и ещё {total_referrals - 10}\n"
+    text = f"🎁 <b>РЕФЕРАЛЬНАЯ ПРОГРАММА</b>\n\n🔗 <b>Ваша ссылка:</b>\n<code>{referral_link}</code>\n\n📊 <b>Статистика:</b>\n• Приглашено: <b>{total_referrals}</b>\n• Заработано: <b>${total_earnings}</b>{referrals_list}\n\n💰 <b>Бонусы:</b>\n• За 5 рефералов → +7 дней\n• За 10 рефералов → +30 дней\n• За 20 рефералов → бессрочно"
+    keyboard = {"inline_keyboard": [[{"text": "📋 СКОПИРОВАТЬ", "callback_data": "copy_link"}], [{"text": "📊 СТАТИСТИКА", "callback_data": "referral_stats"}], [{"text": "🔙 НАЗАД", "callback_data": "back"}]]}
+    send_message(chat_id, text, json.dumps(keyboard))
+
+def show_referral_stats(chat_id):
+    ref_info = get_user_referral_info(chat_id)
+    total_referrals = len(ref_info.get("referrals", []))
+    total_earnings = ref_info.get("earnings", 0)
+    bonus = ""
+    if total_referrals >= 20:
+        bonus = "🏆 <b>БЕССРОЧНАЯ ПОДПИСКА АКТИВНА!</b>"
+    elif total_referrals >= 10:
+        bonus = "🎁 <b>+30 ДНЕЙ ПОДПИСКИ</b> (достигнуто 10 рефералов)"
+    elif total_referrals >= 5:
+        bonus = "🎁 <b>+7 ДНЕЙ ПОДПИСКИ</b> (достигнуто 5 рефералов)"
+    else:
+        bonus = f"🎯 До бонуса осталось: {5 - total_referrals} рефералов"
+    text = f"📊 <b>ДЕТАЛЬНАЯ СТАТИСТИКА</b>\n\n👥 Рефералов: {total_referrals}\n💰 Заработано: ${total_earnings}\n{bonus}"
+    keyboard = {"inline_keyboard": [[{"text": "🔙 НАЗАД", "callback_data": "referral_menu"}]]}
+    send_message(chat_id, text, json.dumps(keyboard))
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -290,100 +444,58 @@ def analyze_all_opportunities(prices, settings):
     amount = max(settings.get('amount', 100), 10)
     min_spread = settings.get('min_spread', 0.3)
     favorites = settings.get('favorites', [])
-    
     for coin, exchanges in prices.items():
-        # Фильтр по избранным монетам
         if favorites and coin not in favorites:
             continue
-            
         if len(exchanges) < 2:
             continue
-        
         exchange_list = list(exchanges.items())
-        
         for i, (buy_ex, buy_data) in enumerate(exchange_list):
             for j, (sell_ex, sell_data) in enumerate(exchange_list):
                 if buy_ex == sell_ex:
                     continue
-                
                 ask = buy_data.get('ask', 0)
                 bid = sell_data.get('bid', 0)
-                
                 if ask <= 0 or bid <= 0:
                     continue
-                
-                # Проверка на аномальные цены
                 price_ratio = max(bid, ask) / min(bid, ask)
                 if price_ratio > 1.5:
                     continue
-                
                 spread = (bid - ask) / ask * 100
-                
                 if spread > 10 or spread < min_spread:
                     continue
-                
                 if not is_same_coin(coin, coin):
                     continue
-                
                 volume = min(buy_data.get('volume', 0), sell_data.get('volume', 0))
                 if volume < 50000:
                     continue
-                
                 buy_fee = EXCHANGE_FEES.get(buy_ex, 0.001)
                 sell_fee = EXCHANGE_FEES.get(sell_ex, 0.001)
                 network_fee = NETWORK_FEES.get(coin, NETWORK_FEES["DEFAULT"])
                 transfer_time = TRANSFER_TIME.get(coin, TRANSFER_TIME["DEFAULT"])
-                
                 coins_bought = amount / ask
                 sell_value = coins_bought * bid
                 gross_profit = sell_value - amount
                 total_fees = (amount * buy_fee) + (sell_value * sell_fee) + network_fee
                 net_profit = gross_profit - total_fees
                 net_profit_pct = (net_profit / amount) * 100
-                
                 if net_profit_pct > 20:
                     continue
-                
                 if net_profit > 0:
-                    # Сохраняем в базу данных
                     save_spread(coin, buy_ex, sell_ex, spread, net_profit, amount, ask, bid)
-                    
                     opportunities.append({
-                        'coin': coin,
-                        'buy_exchange': buy_ex,
-                        'sell_exchange': sell_ex,
-                        'buy_price': round(ask, 8),
-                        'sell_price': round(bid, 8),
-                        'spread': round(spread, 2),
-                        'best_amount': amount,
-                        'best_profit': round(net_profit, 2),
-                        'best_profit_pct': round(net_profit_pct, 2),
-                        'network_fee': network_fee,
-                        'transfer_time': transfer_time,
-                        'buy_fee': round(buy_fee * 100, 2),
-                        'sell_fee': round(sell_fee * 100, 2),
-                        'volume': round(volume, 0),
-                        'last_price': round(buy_data.get('last', ask), 8)
+                        'coin': coin, 'buy_exchange': buy_ex, 'sell_exchange': sell_ex,
+                        'buy_price': round(ask, 8), 'sell_price': round(bid, 8),
+                        'spread': round(spread, 2), 'best_amount': amount,
+                        'best_profit': round(net_profit, 2), 'best_profit_pct': round(net_profit_pct, 2),
+                        'network_fee': network_fee, 'transfer_time': transfer_time,
+                        'buy_fee': round(buy_fee * 100, 2), 'sell_fee': round(sell_fee * 100, 2),
+                        'volume': round(volume, 0), 'last_price': round(buy_data.get('last', ask), 8)
                     })
-    
     return sorted(opportunities, key=lambda x: x['best_profit'], reverse=True)
 
 def format_opportunity_message(opp):
-    msg = f"""
-🚀 <b>{opp['coin']}/USDT</b>
-
-📊 <b>СПРЕД:</b> {opp['spread']}%
-
-📈 <b>КУПИТЬ:</b> {opp['buy_exchange'].upper()} | ${opp['buy_price']}
-📉 <b>ПРОДАТЬ:</b> {opp['sell_exchange'].upper()} | ${opp['sell_price']}
-
-💰 <b>ПРИБЫЛЬ:</b> +${opp['best_profit']} ({opp['best_profit_pct']}%) с ${opp['best_amount']}
-
-💸 <b>КОМИССИИ:</b> {opp['buy_fee']}% + {opp['sell_fee']}% | Сеть: ${opp['network_fee']} | {opp['transfer_time']} мин
-
-📊 <b>ЛИКВИДНОСТЬ:</b> ${int(opp['volume']):,}
-"""
-    return msg
+    return f"🚀 <b>{opp['coin']}/USDT</b>\n\n📊 <b>СПРЕД:</b> {opp['spread']}%\n\n📈 <b>КУПИТЬ:</b> {opp['buy_exchange'].upper()} | ${opp['buy_price']}\n📉 <b>ПРОДАТЬ:</b> {opp['sell_exchange'].upper()} | ${opp['sell_price']}\n\n💰 <b>ПРИБЫЛЬ:</b> +${opp['best_profit']} ({opp['best_profit_pct']}%) с ${opp['best_amount']}\n\n💸 <b>КОМИССИИ:</b> {opp['buy_fee']}% + {opp['sell_fee']}% | Сеть: ${opp['network_fee']} | {opp['transfer_time']} мин\n\n📊 <b>ЛИКВИДНОСТЬ:</b> ${int(opp['volume']):,}"
 
 # ========= TELEGRAM БОТ =========
 def send_message(chat_id, text, keyboard=None):
@@ -398,53 +510,37 @@ def send_message(chat_id, text, keyboard=None):
 def show_main_menu(chat_id, is_admin=False):
     user = USERS.get(chat_id, {})
     favorites = get_user_favorites(chat_id)
-    
+    has_subscription = check_subscription(chat_id)
+    sub_status = get_subscription_status_text(chat_id)
     keyboard = {
         "inline_keyboard": [
-            [{"text": "🚀 ЗАПУСТИТЬ", "callback_data": "start"},
-             {"text": "⏹️ ОСТАНОВИТЬ", "callback_data": "stop"}],
+            [{"text": "🚀 ЗАПУСТИТЬ", "callback_data": "start"}, {"text": "⏹️ ОСТАНОВИТЬ", "callback_data": "stop"}],
             [{"text": "🔍 ПОКАЗАТЬ ВСЕ СПРЕДЫ", "callback_data": "show_all"}],
             [{"text": "⭐ ИЗБРАННЫЕ МОНЕТЫ", "callback_data": "favorites_menu"}],
-            [{"text": "💰 СУММА", "callback_data": "change_amount"},
-             {"text": "🎯 MIN СПРЕД", "callback_data": "change_spread"}],
-            [{"text": "📊 СТАТУС", "callback_data": "status"},
-             {"text": "🏆 ТОП-10 СПРЕДОВ", "callback_data": "top_spreads"}],
-            [{"text": "📈 ГРАФИК СПРЕДОВ", "callback_data": "chart"},
-             {"text": "📜 ИСТОРИЯ", "callback_data": "history"}],
+            [{"text": "💰 СУММА", "callback_data": "change_amount"}, {"text": "🎯 MIN СПРЕД", "callback_data": "change_spread"}],
+            [{"text": "📊 СТАТУС", "callback_data": "status"}, {"text": "🏆 ТОП-10 СПРЕДОВ", "callback_data": "top_spreads"}],
+            [{"text": "📈 ГРАФИК СПРЕДОВ", "callback_data": "chart"}, {"text": "📜 ИСТОРИЯ", "callback_data": "history"}],
+            [{"text": "🎁 РЕФЕРАЛЬНАЯ ПРОГРАММА", "callback_data": "referral_menu"}],
+            [{"text": "💎 ПОДПИСКА", "callback_data": "subscription_menu"}],
             [{"text": "ℹ️ ПОМОЩЬ", "callback_data": "help"}]
         ]
     }
     if is_admin:
         keyboard["inline_keyboard"].append([{"text": "👑 АДМИН", "callback_data": "admin_panel"}])
-    
-    fav_text = f"⭐ Избранное: {', '.join(favorites[:5]) if favorites else 'нет'}"
-    
-    text = f"""
-🤖 <b>АРБИТРАЖНЫЙ СКАНЕР</b>
-
-📊 Монет: <b>{len(TOP_COINS)}</b>
-🏦 Бирж: <b>{len(EXCHANGES)}</b>
-
-⚙️ <b>НАСТРОЙКИ:</b>
-💰 Сумма: <b>${user.get('amount', 100)}</b>
-🎯 Min спред: <b>{user.get('min_spread', 0.3)}%</b>
-🔔 Уведомления: <b>{'ВКЛ' if user.get('active') else 'ВЫКЛ'}</b>
-{fav_text}
-
-👇 ВЫБЕРИТЕ ДЕЙСТВИЕ:
-"""
+    warning = ""
+    if not has_subscription:
+        warning = "⚠️ <b>НЕТ АКТИВНОЙ ПОДПИСКИ!</b>\nПопробуйте пробный период 1 день или оформите подписку.\n\n"
+    text = f"{warning}🤖 <b>АРБИТРАЖНЫЙ СКАНЕР</b>\n\n📊 Монет: <b>{len(TOP_COINS)}</b>\n🏦 Бирж: <b>{len(EXCHANGES)}</b>\n\n⚙️ <b>НАСТРОЙКИ:</b>\n💰 Сумма: <b>${user.get('amount', 100)}</b>\n🎯 Min спред: <b>{user.get('min_spread', 0.3)}%</b>\n⭐ Избранное: {', '.join(favorites[:5]) if favorites else 'нет'}\n\n💎 <b>ПОДПИСКА:</b>\n{sub_status}\n\n👇 ВЫБЕРИТЕ ДЕЙСТВИЕ:"
     send_message(chat_id, text, json.dumps(keyboard))
 
 def show_favorites_menu(chat_id):
     favorites = get_user_favorites(chat_id)
     top_coins = TOP_COINS[:30] if TOP_COINS else ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "DOT", "LINK"]
-    
     keyboard = {"inline_keyboard": []}
     for coin in top_coins:
         status = "✅" if coin in favorites else "❌"
         keyboard["inline_keyboard"].append([{"text": f"{status} {coin}", "callback_data": f"fav_{coin}"}])
     keyboard["inline_keyboard"].append([{"text": "🔙 НАЗАД", "callback_data": "back"}])
-    
     text = f"⭐ <b>ИЗБРАННЫЕ МОНЕТЫ</b>\n\nТекущие: {', '.join(favorites[:10]) if favorites else 'не выбраны'}\n\nВыберите монеты:"
     send_message(chat_id, text, json.dumps(keyboard))
 
@@ -485,10 +581,19 @@ def run_bot():
                 if msg:
                     chat_id = msg["chat"]["id"]
                     is_admin = (chat_id == ADMIN_ID)
+                    text = msg.get("text", "")
                     if chat_id not in USERS:
                         USERS[chat_id] = {"active": False, "amount": 100, "min_spread": 0.3, "last_alerts": {}}
                         save_user_to_db(chat_id)
-                    if msg.get("text") == "/start":
+                    if text == "/start":
+                        if "ref_" in text:
+                            try:
+                                referrer_id = int(text.split("ref_")[1])
+                                if referrer_id != chat_id:
+                                    add_referral(chat_id, referrer_id)
+                                    send_message(chat_id, f"🎉 Вы зарегистрировались по реферальной ссылке! Получите бонус ${REFERRAL_BONUS_NEW_USER} USDT после первой оплаты!")
+                                    send_message(referrer_id, f"🎉 По вашей реферальной ссылке зарегистрировался новый пользователь!")
+                            except: pass
                         show_main_menu(chat_id, is_admin)
                 callback = update.get("callback_query")
                 if callback:
@@ -499,10 +604,12 @@ def run_bot():
                         USERS[chat_id] = {"active": False, "amount": 100, "min_spread": 0.3, "last_alerts": {}}
                         save_user_to_db(chat_id)
                     user = USERS[chat_id]
-                    
                     if data_cb == "start":
-                        user["active"] = True
-                        send_message(chat_id, "✅ Уведомления ВКЛЮЧЕНЫ!")
+                        if check_subscription(chat_id) or get_user_subscription(chat_id).get("trial_used", False):
+                            user["active"] = True
+                            send_message(chat_id, "✅ Уведомления ВКЛЮЧЕНЫ!")
+                        else:
+                            send_message(chat_id, "❌ Сначала активируйте пробный период или оформите подписку!")
                         show_main_menu(chat_id, is_admin)
                     elif data_cb == "stop":
                         user["active"] = False
@@ -576,6 +683,29 @@ def run_bot():
                     elif data_cb == "history":
                         show_history(chat_id)
                         show_main_menu(chat_id, is_admin)
+                    elif data_cb == "referral_menu":
+                        show_referral_menu(chat_id)
+                    elif data_cb == "referral_stats":
+                        show_referral_stats(chat_id)
+                    elif data_cb == "copy_link":
+                        link = generate_referral_link(chat_id)
+                        send_message(chat_id, f"🔗 <b>Ваша реферальная ссылка:</b>\n<code>{link}</code>\n\nПоделитесь с друзьями!")
+                        show_referral_menu(chat_id)
+                    elif data_cb == "subscription_menu":
+                        show_subscription_menu(chat_id)
+                    elif data_cb == "trial_activate":
+                        if activate_trial(chat_id):
+                            send_message(chat_id, f"✅ Пробный период активирован на {TRIAL_DAYS} дня!\n\nНаслаждайтесь всеми функциями сканера!")
+                            if chat_id in USERS:
+                                USERS[chat_id]["active"] = True
+                        else:
+                            send_message(chat_id, "❌ Пробный период уже был использован!")
+                        show_main_menu(chat_id, is_admin)
+                    elif data_cb == "subscribe":
+                        payment_link = generate_payment_link(chat_id)
+                        text = f"💳 <b>ОПЛАТА ПОДПИСКИ</b>\n\nСумма: <b>${SUBSCRIPTION_PRICE} USDT</b>\n\n1. Откройте CryptoBot: {payment_link}\n2. Оплатите ${SUBSCRIPTION_PRICE} USDT\n3. После оплаты нажмите /confirm\n\n📩 Вопросы: @ваш_username"
+                        send_message(chat_id, text)
+                        show_subscription_menu(chat_id)
                     elif data_cb == "status":
                         favorites = get_user_favorites(chat_id)
                         text = f"📊 СТАТУС\n\nАктивен: {'✅' if user['active'] else '⏹️'}\nСумма: ${user['amount']}\nMin спред: {user['min_spread']}%\nМонет: {len(TOP_COINS)}\nБирж: {len(EXCHANGES)}\n⭐ Избранное: {', '.join(favorites[:5]) if favorites else 'нет'}"
@@ -596,7 +726,7 @@ def run_bot():
                         send_message(chat_id, text[:4000])
                         show_admin_panel(chat_id)
                     elif data_cb == "help":
-                        text = "ℹ️ ПОМОЩЬ\n\n🚀 ЗАПУСТИТЬ — автоуведомления\n🔍 ПОКАЗАТЬ ВСЕ СПРЕДЫ — ручной поиск\n⭐ ИЗБРАННЫЕ — выбрать монеты\n💰 СУММА — от $10\n🎯 MIN СПРЕД — порог\n🏆 ТОП-10 — лучшие сейчас\n📈 ГРАФИК — визуализация\n📜 ИСТОРИЯ — топ за всё время"
+                        text = "ℹ️ ПОМОЩЬ\n\n🚀 ЗАПУСТИТЬ — автоуведомления\n🔍 ПОКАЗАТЬ ВСЕ СПРЕДЫ — ручной поиск\n⭐ ИЗБРАННЫЕ — выбрать монеты\n💰 СУММА — от $10\n🎯 MIN СПРЕД — порог\n🏆 ТОП-10 — лучшие сейчас\n📈 ГРАФИК — визуализация\n📜 ИСТОРИЯ — топ за всё время\n🎁 РЕФЕРАЛЫ — приглашай друзей\n💎 ПОДПИСКА — пробный период 1 день"
                         send_message(chat_id, text)
                         show_main_menu(chat_id, is_admin)
                     elif data_cb == "back":
@@ -616,7 +746,7 @@ async def main_scanner():
             prices = await fetch_all_prices()
             last_prices = prices
             for chat_id, user in USERS.items():
-                if user.get("active"):
+                if user.get("active") and check_subscription(chat_id):
                     favorites = get_user_favorites(chat_id)
                     opps = analyze_all_opportunities(prices, {**user, "favorites": favorites})
                     for opp in opps[:3]:
