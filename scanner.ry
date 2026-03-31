@@ -11,14 +11,14 @@ import ccxt.async_support as ccxt
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 from io import BytesIO
-
-# Отключаем ненужные предупреждения
+import websockets
 import warnings
+
 warnings.filterwarnings("ignore")
 
 # ========= КОНФИГУРАЦИЯ =========
 TELEGRAM_TOKEN = "8780012882:AAHI92nj-1Punbum_5FSzATDy58UgK4JAX4"
-ADMIN_ID = 1071868963  # ТВОЙ TELEGRAM ID (ТОЛЬКО У ТЕБЯ ДОСТУП БЕЗ ПОДПИСКИ)
+ADMIN_ID = 1071868963
 
 # 11 ПОПУЛЯРНЫХ БИРЖ
 EXCHANGES_LIST = [
@@ -97,11 +97,8 @@ def init_db():
                   first_seen INTEGER, last_seen INTEGER)''')
     c.execute('''CREATE TABLE IF NOT EXISTS subscriptions
                  (chat_id INTEGER PRIMARY KEY,
-                  plan TEXT,
-                  paid_until INTEGER,
-                  amount REAL,
-                  txid TEXT,
-                  payment_date INTEGER)''')
+                  plan TEXT, paid_until INTEGER, amount REAL,
+                  txid TEXT, payment_date INTEGER)''')
     conn.commit()
     conn.close()
     logger.info("📦 База данных инициализирована")
@@ -196,14 +193,13 @@ def generate_spread_chart(coin=None):
     plt.close()
     return buf
 
-# ========= ПЛАТЁЖНАЯ СИСТЕМА И ПОДПИСКА =========
-# ТАРИФЫ
+# ========= ПЛАТЁЖНАЯ СИСТЕМА =========
 PLANS = {
-    "week": {"name": "Неделя", "days": 7, "price": 5, "price_usd": 5},
-    "month": {"name": "Месяц", "days": 30, "price": 20, "price_usd": 20},
-    "3months": {"name": "3 Месяца", "days": 90, "price": 50, "price_usd": 50},
-    "year": {"name": "Год", "days": 365, "price": 100, "price_usd": 100},
-    "lifetime": {"name": "Бессрочно", "days": 36500, "price": 350, "price_usd": 350}
+    "week": {"name": "Неделя", "days": 7, "price": 5},
+    "month": {"name": "Месяц", "days": 30, "price": 20},
+    "3months": {"name": "3 Месяца", "days": 90, "price": 50},
+    "year": {"name": "Год", "days": 365, "price": 100},
+    "lifetime": {"name": "Бессрочно", "days": 36500, "price": 350}
 }
 
 def get_user_subscription(chat_id):
@@ -216,8 +212,7 @@ def get_user_subscription(chat_id):
         if result:
             return {"plan": result[0], "paid_until": result[1], "amount": result[2], "txid": result[3], "payment_date": result[4]}
         return None
-    except:
-        return None
+    except: return None
 
 def save_subscription(chat_id, plan, paid_until, amount, txid):
     try:
@@ -228,117 +223,27 @@ def save_subscription(chat_id, plan, paid_until, amount, txid):
         conn.commit()
         conn.close()
         return True
-    except:
-        return False
+    except: return False
 
 def check_subscription(chat_id):
-    # АДМИН — ВСЕГДА ДОСТУП БЕЗ ПОДПИСКИ
     if chat_id == ADMIN_ID:
         return True
-    
     sub = get_user_subscription(chat_id)
-    if sub and sub[1] > time.time():
+    if sub and sub["paid_until"] > time.time():
         return True
     return False
 
 def get_subscription_status_text(chat_id):
     if chat_id == ADMIN_ID:
-        return "👑 АДМИН — полный доступ без подписки"
-    
+        return "👑 АДМИН — полный доступ"
     sub = get_user_subscription(chat_id)
-    if sub:
-        paid_until = sub[1]
-        plan = sub[0]
-        if paid_until > time.time():
-            days_left = int((paid_until - time.time()) / 86400)
-            return f"✅ План: {PLANS.get(plan, {}).get('name', plan)}\nДействует до: {datetime.fromtimestamp(paid_until).strftime('%d.%m.%Y')} (осталось {days_left} дн.)"
-        else:
-            return "⏰ Подписка закончилась. Оформите новую!"
+    if sub and sub["paid_until"] > time.time():
+        days_left = int((sub["paid_until"] - time.time()) / 86400)
+        return f"✅ {PLANS.get(sub['plan'], {}).get('name', 'Активна')} до {datetime.fromtimestamp(sub['paid_until']).strftime('%d.%m.%Y')} (осталось {days_left} дн.)"
     return "❌ Нет активной подписки"
 
 def generate_payment_link(chat_id, plan_id):
-    """Генерирует ссылку для оплаты через CryptoBot"""
-    plan = PLANS.get(plan_id)
-    if not plan:
-        return None
-    # Формат ссылки для CryptoBot
-    amount = plan["price_usd"]
-    return f"https://t.me/CryptoBot?start=pay_{amount}_{chat_id}_{plan_id}"
-
-def show_subscription_menu(chat_id):
-    text = "💎 <b>ВЫБЕРИТЕ ТАРИФ</b>\n\n"
-    keyboard = []
-    for plan_id, plan in PLANS.items():
-        text += f"• <b>{plan['name']}</b> — ${plan['price_usd']}\n"
-        keyboard.append([{"text": f"💳 {plan['name']} — ${plan['price_usd']}", "callback_data": f"plan_{plan_id}"}])
-    keyboard.append([{"text": "🔙 НАЗАД", "callback_data": "back"}])
-    
-    send_message(chat_id, text, json.dumps({"inline_keyboard": keyboard}))
-
-def show_confirm_payment(chat_id, plan_id, txid=None):
-    plan = PLANS.get(plan_id)
-    if not plan:
-        return
-    
-    text = f"""
-💳 <b>ОПЛАТА ПОДПИСКИ</b>
-
-<b>Тариф:</b> {plan['name']}
-<b>Сумма:</b> ${plan['price_usd']} USDT
-
-<b>Способ оплаты:</b> CryptoBot
-
-1️⃣ Отправьте {plan['price_usd']} USDT на кошелек:
-<code>TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t</code> (TRC-20)
-
-2️⃣ Или перейдите по ссылке:
-{generate_payment_link(chat_id, plan_id)}
-
-3️⃣ После оплаты нажмите /confirm {plan_id} TXID
-
-<i>После подтверждения подписка активируется автоматически!</i>
-"""
-    send_message(chat_id, text)
-
-def confirm_payment(chat_id, plan_id, txid):
-    plan = PLANS.get(plan_id)
-    if not plan:
-        send_message(chat_id, "❌ Неверный тариф")
-        return False
-    
-    paid_until = int(time.time()) + (plan["days"] * 86400)
-    if save_subscription(chat_id, plan_id, paid_until, plan["price_usd"], txid):
-        send_message(chat_id, f"✅ Подписка <b>{plan['name']}</b> активирована!\nДействует до: {datetime.fromtimestamp(paid_until).strftime('%d.%m.%Y')}")
-        
-        # Начисляем бонус рефереру
-        ref_info = get_user_referral_info(chat_id)
-        referrer_id = ref_info.get("referred_by")
-        if referrer_id:
-            bonus = plan["price_usd"] * 0.2
-            add_referral_earnings(referrer_id, bonus)
-            send_message(referrer_id, f"🎉 Ваш реферал оформил подписку! Вы получили ${bonus:.2f} на баланс!")
-            
-            # Проверяем бонусы за количество рефералов
-            refs = load_referrals()
-            total_refs = len(refs.get(str(referrer_id), {}).get("referrals", []))
-            if total_refs >= 20:
-                save_subscription(referrer_id, "lifetime", 9999999999, 0, "bonus")
-                send_message(referrer_id, "🏆 ПОЗДРАВЛЯЕМ! Вы достигли 20 рефералов и получили БЕССРОЧНУЮ ПОДПИСКУ!")
-            elif total_refs >= 10:
-                current_sub = get_user_subscription(referrer_id)
-                current_until = current_sub[1] if current_sub else int(time.time())
-                new_until = max(current_until, int(time.time())) + (30 * 86400)
-                save_subscription(referrer_id, "month", new_until, 0, "bonus_10")
-                send_message(referrer_id, "🎁 ПОЗДРАВЛЯЕМ! Вы достигли 10 рефералов и получили +30 дней подписки!")
-            elif total_refs >= 5:
-                current_sub = get_user_subscription(referrer_id)
-                current_until = current_sub[1] if current_sub else int(time.time())
-                new_until = max(current_until, int(time.time())) + (7 * 86400)
-                save_subscription(referrer_id, "week", new_until, 0, "bonus_5")
-                send_message(referrer_id, "🎁 ПОЗДРАВЛЯЕМ! Вы достигли 5 рефералов и получили +7 дней подписки!")
-        
-        return True
-    return False
+    return f"https://t.me/CryptoBot?start=pay_{plan_id}_{chat_id}"
 
 # ========= РЕФЕРАЛЬНАЯ СИСТЕМА =========
 REFERRALS_FILE = "referrals.json"
@@ -349,8 +254,7 @@ def load_referrals():
         try:
             with open(REFERRALS_FILE, 'r') as f:
                 return json.load(f)
-        except:
-            pass
+        except: pass
     return {}
 
 def save_referrals(data):
@@ -384,43 +288,38 @@ def add_referral_earnings(referrer_id, amount):
 def generate_referral_link(chat_id):
     return f"https://t.me/Scanner_AD01_bot?start=ref_{chat_id}"
 
-def show_referral_menu(chat_id):
-    ref_info = get_user_referral_info(chat_id)
-    referral_link = generate_referral_link(chat_id)
-    total_referrals = len(ref_info.get("referrals", []))
-    total_earnings = ref_info.get("earnings", 0)
-    referrals_list = ""
-    if total_referrals > 0:
-        referrals_list = "\n👥 <b>Ваши рефералы:</b>\n"
-        for ref_id in ref_info.get("referrals", [])[:10]:
-            try:
-                user_info = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getChat", params={"chat_id": ref_id}).json()
-                name = user_info.get("result", {}).get("first_name", str(ref_id))
-            except:
-                name = str(ref_id)
-            referrals_list += f"• {name}\n"
-        if total_referrals > 10:
-            referrals_list += f"... и ещё {total_referrals - 10}\n"
-    text = f"🎁 <b>РЕФЕРАЛЬНАЯ ПРОГРАММА</b>\n\n🔗 <b>Ваша ссылка:</b>\n<code>{referral_link}</code>\n\n📊 <b>Статистика:</b>\n• Приглашено: <b>{total_referrals}</b>\n• Заработано: <b>${total_earnings:.2f}</b>{referrals_list}\n\n💰 <b>Бонусы:</b>\n• За 5 рефералов → +7 дней\n• За 10 рефералов → +30 дней\n• За 20 рефералов → бессрочно\n\n💎 <b>Вы получаете 20% от платежа каждого реферала!</b>"
-    keyboard = {"inline_keyboard": [[{"text": "📋 СКОПИРОВАТЬ", "callback_data": "copy_link"}], [{"text": "📊 СТАТИСТИКА", "callback_data": "referral_stats"}], [{"text": "🔙 НАЗАД", "callback_data": "back"}]]}
-    send_message(chat_id, text, json.dumps(keyboard))
+# ========= WEBSOCKET ДЛЯ РЕАЛЬНОГО ВРЕМЕНИ =========
+ws_prices = {}
+ws_tasks = []
 
-def show_referral_stats(chat_id):
-    ref_info = get_user_referral_info(chat_id)
-    total_referrals = len(ref_info.get("referrals", []))
-    total_earnings = ref_info.get("earnings", 0)
-    bonus = ""
-    if total_referrals >= 20:
-        bonus = "🏆 <b>БЕССРОЧНАЯ ПОДПИСКА АКТИВНА!</b>"
-    elif total_referrals >= 10:
-        bonus = "🎁 <b>+30 ДНЕЙ ПОДПИСКИ</b> (достигнуто 10 рефералов)"
-    elif total_referrals >= 5:
-        bonus = "🎁 <b>+7 ДНЕЙ ПОДПИСКИ</b> (достигнуто 5 рефералов)"
-    else:
-        bonus = f"🎯 До бонуса осталось: {5 - total_referrals} рефералов"
-    text = f"📊 <b>ДЕТАЛЬНАЯ СТАТИСТИКА</b>\n\n👥 Рефералов: {total_referrals}\n💰 Заработано: ${total_earnings:.2f}\n{bonus}"
-    keyboard = {"inline_keyboard": [[{"text": "🔙 НАЗАД", "callback_data": "referral_menu"}]]}
-    send_message(chat_id, text, json.dumps(keyboard))
+async def binance_ws_stream():
+    symbols = ["btcusdt", "ethusdt", "solusdt", "bnbusdt", "xrpusdt", "dogeusdt", "adausdt", "avaxusdt", "dotusdt", "linkusdt"]
+    stream_names = [f"{s}@ticker" for s in symbols]
+    stream_url = "wss://stream.binance.com:9443/ws/" + "/".join(stream_names)
+    while True:
+        try:
+            async with websockets.connect(stream_url) as ws:
+                while True:
+                    try:
+                        msg = await asyncio.wait_for(ws.recv(), timeout=30)
+                        data = json.loads(msg)
+                        coin = data.get('s', '').replace('USDT', '').upper()
+                        ws_prices[coin] = {
+                            'bid': float(data.get('b', 0)),
+                            'ask': float(data.get('a', 0)),
+                            'last': float(data.get('c', 0)),
+                            'exchange': 'binance',
+                            'timestamp': time.time()
+                        }
+                    except asyncio.TimeoutError:
+                        continue
+        except Exception as e:
+            logger.error(f"Binance WS: {e}")
+            await asyncio.sleep(5)
+
+async def start_websockets():
+    asyncio.create_task(binance_ws_stream())
+    logger.info("⚡ WebSocket стримы запущены")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -432,7 +331,7 @@ last_update_id = 0
 COINS_CACHE_FILE = "coins_cache.json"
 TOP_COINS = []
 
-# ========= ЗАГРУЗКА МОНЕТ С БИРЖ =========
+# ========= ЗАГРУЗКА МОНЕТ =========
 async def load_coins_from_exchanges():
     if os.path.exists(COINS_CACHE_FILE):
         try:
@@ -444,23 +343,21 @@ async def load_coins_from_exchanges():
                         logger.info(f"📦 Загружено {len(coins)} монет из кэша")
                         return coins
         except: pass
-    logger.info("🔄 Сбор ВСЕХ монет с бирж...")
+    logger.info("🔄 Сбор монет с бирж...")
     all_coins = set()
     for name, exchange in EXCHANGES.items():
         try:
             markets = await exchange.load_markets()
-            count = 0
             for symbol in markets:
                 if '/USDT' in symbol.upper():
                     coin = symbol.upper().replace('/USDT', '').split(':')[0]
                     coin = ''.join(c for c in coin if c.isalnum())
                     if len(coin) <= 10 and coin not in all_coins:
                         all_coins.add(coin)
-                        count += 1
-            logger.info(f"  ✅ {name}: +{count} монет")
+            logger.info(f"  ✅ {name}")
         except: pass
     coins_list = sorted(list(all_coins))
-    logger.info(f"🎯 ВСЕГО СОБРАНО МОНЕТ: {len(coins_list)}")
+    logger.info(f"🎯 Всего монет: {len(coins_list)}")
     try:
         with open(COINS_CACHE_FILE, 'w') as f:
             json.dump({"timestamp": time.time(), "symbols": coins_list}, f)
@@ -476,7 +373,11 @@ def home():
 
 @app.route('/health')
 def health():
-    return "OK"
+    return "OK", 200, {'Content-Type': 'text/plain'}
+
+@app.route('/ping')
+def ping():
+    return "OK", 200, {'Content-Type': 'text/plain'}
 
 def run_web():
     app.run(host='0.0.0.0', port=8080)
@@ -484,7 +385,7 @@ def run_web():
 def keep_alive():
     while True:
         try:
-            requests.get("http://localhost:8080/health", timeout=5)
+            requests.get("http://localhost:8080/ping", timeout=5)
         except: pass
         time.sleep(120)
 
@@ -499,25 +400,31 @@ async def init_exchanges():
         except:
             logger.warning(f"⚠️ {name}")
 
-# ========= ПОЛУЧЕНИЕ ЦЕН =========
+# ========= ПОЛУЧЕНИЕ ЦЕН (ГИБРИД) =========
 async def fetch_all_prices():
     result = {}
+    for coin, data in ws_prices.items():
+        if time.time() - data.get('timestamp', 0) < 5:
+            result[coin] = {data['exchange']: {'bid': data['bid'], 'ask': data['ask'], 'volume': 0, 'last': data['last']}}
     for name, ex in EXCHANGES.items():
         try:
-            tickers = await ex.fetch_tickers()
-            for symbol, ticker in tickers.items():
-                if symbol.endswith('/USDT'):
-                    coin = symbol.replace('/USDT', '')
-                    volume = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0)
-                    if volume < 10000:
-                        continue
-                    result[coin] = result.get(coin, {})
-                    result[coin][name] = {
-                        'bid': ticker.get('bid', 0) or ticker.get('last', 0),
-                        'ask': ticker.get('ask', 0) or ticker.get('last', 0),
-                        'volume': volume,
-                        'last': ticker.get('last', 0)
-                    }
+            for coin in TOP_COINS[:200]:
+                if coin in result and name in result[coin]:
+                    continue
+                symbol = f"{coin}/USDT"
+                if symbol not in ex.symbols:
+                    continue
+                ticker = await ex.fetch_ticker(symbol)
+                volume = ticker.get('quoteVolume', 0) or ticker.get('baseVolume', 0)
+                if volume < 10000:
+                    continue
+                result[coin] = result.get(coin, {})
+                result[coin][name] = {
+                    'bid': ticker.get('bid', 0) or ticker.get('last', 0),
+                    'ask': ticker.get('ask', 0) or ticker.get('last', 0),
+                    'volume': volume,
+                    'last': ticker.get('last', 0)
+                }
         except: pass
     return result
 
@@ -595,49 +502,44 @@ def show_main_menu(chat_id, is_admin=False):
     favorites = get_user_favorites(chat_id)
     has_subscription = check_subscription(chat_id)
     sub_status = get_subscription_status_text(chat_id)
-    
     keyboard = {
         "inline_keyboard": [
             [{"text": "🚀 ЗАПУСТИТЬ", "callback_data": "start"}, {"text": "⏹️ ОСТАНОВИТЬ", "callback_data": "stop"}],
             [{"text": "🔍 ПОКАЗАТЬ ВСЕ СПРЕДЫ", "callback_data": "show_all"}],
             [{"text": "⭐ ИЗБРАННЫЕ МОНЕТЫ", "callback_data": "favorites_menu"}],
             [{"text": "💰 СУММА", "callback_data": "change_amount"}, {"text": "🎯 MIN СПРЕД", "callback_data": "change_spread"}],
-            [{"text": "📊 СТАТУС", "callback_data": "status"}, {"text": "🏆 ТОП-10 СПРЕДОВ", "callback_data": "top_spreads"}],
-            [{"text": "📈 ГРАФИК СПРЕДОВ", "callback_data": "chart"}, {"text": "📜 ИСТОРИЯ", "callback_data": "history"}],
-            [{"text": "🎁 РЕФЕРАЛЬНАЯ ПРОГРАММА", "callback_data": "referral_menu"}],
-            [{"text": "💎 ПОДПИСКА", "callback_data": "subscription_menu"}],
+            [{"text": "📊 СТАТУС", "callback_data": "status"}, {"text": "🏆 ТОП-10", "callback_data": "top_spreads"}],
+            [{"text": "📈 ГРАФИК", "callback_data": "chart"}, {"text": "📜 ИСТОРИЯ", "callback_data": "history"}],
+            [{"text": "🎁 РЕФЕРАЛЫ", "callback_data": "referral_menu"}, {"text": "💎 ПОДПИСКА", "callback_data": "subscription_menu"}],
             [{"text": "ℹ️ ПОМОЩЬ", "callback_data": "help"}]
         ]
     }
     if is_admin:
         keyboard["inline_keyboard"].append([{"text": "👑 АДМИН", "callback_data": "admin_panel"}])
-    
     warning = ""
     if not has_subscription and not is_admin:
-        warning = "⚠️ <b>НЕТ АКТИВНОЙ ПОДПИСКИ!</b>\nОформите подписку, чтобы пользоваться сканером.\n\n"
-    
-    text = f"{warning}🤖 <b>АРБИТРАЖНЫЙ СКАНЕР</b>\n\n📊 Монет: <b>{len(TOP_COINS)}</b>\n🏦 Бирж: <b>{len(EXCHANGES)}</b>\n\n⚙️ <b>НАСТРОЙКИ:</b>\n💰 Сумма: <b>${user.get('amount', 100)}</b>\n🎯 Min спред: <b>{user.get('min_spread', 0.3)}%</b>\n⭐ Избранное: {', '.join(favorites[:5]) if favorites else 'нет'}\n\n💎 <b>ПОДПИСКА:</b>\n{sub_status}\n\n👇 ВЫБЕРИТЕ ДЕЙСТВИЕ:"
+        warning = "⚠️ НЕТ ПОДПИСКИ! Оформите в 💎 ПОДПИСКА\n\n"
+    text = f"{warning}🤖 <b>АРБИТРАЖНЫЙ СКАНЕР</b>\n\n📊 Монет: {len(TOP_COINS)}\n🏦 Бирж: {len(EXCHANGES)}\n⚡ WebSocket: Binance (реальное время)\n\n⚙️ <b>НАСТРОЙКИ:</b>\n💰 Сумма: ${user.get('amount', 100)}\n🎯 Min спред: {user.get('min_spread', 0.3)}%\n⭐ Избранное: {', '.join(favorites[:5]) if favorites else 'нет'}\n\n💎 <b>ПОДПИСКА:</b>\n{sub_status}\n\n👇 ВЫБЕРИТЕ ДЕЙСТВИЕ:"
     send_message(chat_id, text, json.dumps(keyboard))
 
 def show_favorites_menu(chat_id):
     favorites = get_user_favorites(chat_id)
-    top_coins = TOP_COINS[:30] if TOP_COINS else ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "DOT", "LINK"]
+    top_coins = TOP_COINS[:30] if TOP_COINS else ["BTC", "ETH", "SOL", "BNB", "XRP"]
     keyboard = {"inline_keyboard": []}
     for coin in top_coins:
         status = "✅" if coin in favorites else "❌"
         keyboard["inline_keyboard"].append([{"text": f"{status} {coin}", "callback_data": f"fav_{coin}"}])
     keyboard["inline_keyboard"].append([{"text": "🔙 НАЗАД", "callback_data": "back"}])
-    text = f"⭐ <b>ИЗБРАННЫЕ МОНЕТЫ</b>\n\nТекущие: {', '.join(favorites[:10]) if favorites else 'не выбраны'}\n\nВыберите монеты:"
-    send_message(chat_id, text, json.dumps(keyboard))
+    send_message(chat_id, f"⭐ ИЗБРАННЫЕ\n\nТекущие: {', '.join(favorites[:10]) or 'нет'}", json.dumps(keyboard))
 
 def show_history(chat_id):
     top_spreads = get_top_spreads_history(10)
     if not top_spreads:
-        send_message(chat_id, "📜 История спредов пуста")
+        send_message(chat_id, "📜 История пуста")
         return
-    text = "📜 <b>ТОП-10 СПРЕДОВ ЗА ВСЁ ВРЕМЯ</b>\n\n"
+    text = "📜 ТОП-10 СПРЕДОВ\n\n"
     for i, (coin, buy_ex, sell_ex, spread, profit, amount, date) in enumerate(top_spreads, 1):
-        text += f"{i}. <b>{coin}</b> | {buy_ex} → {sell_ex}\n   📊 {spread:.2f}% | 💰 +${profit:.2f} (с ${amount})\n   🕐 {date}\n\n"
+        text += f"{i}. {coin} | {buy_ex}→{sell_ex} | {spread:.2f}% | +${profit:.2f} | {date}\n"
     send_message(chat_id, text)
 
 def show_amount_keyboard(chat_id):
@@ -648,85 +550,92 @@ def show_spread_keyboard(chat_id):
     keyboard = {"inline_keyboard": [[{"text": f"{s}%", "callback_data": f"spread_{int(s*100):02d}"} for s in [0.1,0.2,0.3,0.5,1.0,2.0]], [{"text":"🔙 НАЗАД","callback_data":"back"}]]}
     send_message(chat_id, "🎯 ВЫБЕРИТЕ MIN СПРЕД:", json.dumps(keyboard))
 
+def show_subscription_menu(chat_id):
+    text = "💎 ВЫБЕРИТЕ ТАРИФ\n\n"
+    keyboard = []
+    for plan_id, plan in PLANS.items():
+        text += f"• {plan['name']} — ${plan['price']}\n"
+        keyboard.append([{"text": f"💳 {plan['name']} — ${plan['price']}", "callback_data": f"plan_{plan_id}"}])
+    keyboard.append([{"text": "🔙 НАЗАД", "callback_data": "back"}])
+    send_message(chat_id, text, json.dumps({"inline_keyboard": keyboard}))
+
+def show_confirm_payment(chat_id, plan_id):
+    plan = PLANS.get(plan_id)
+    if not plan:
+        return
+    text = f"💳 ОПЛАТА\n\nТариф: {plan['name']}\nСумма: ${plan['price']} USDT\n\nОтправьте {plan['price']} USDT на:\n<code>TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t</code> (TRC-20)\n\nПосле оплаты: /confirm {plan_id} TXID"
+    send_message(chat_id, text)
+
+def confirm_payment(chat_id, plan_id, txid):
+    plan = PLANS.get(plan_id)
+    if not plan:
+        return False
+    paid_until = int(time.time()) + (plan["days"] * 86400)
+    if save_subscription(chat_id, plan_id, paid_until, plan["price"], txid):
+        send_message(chat_id, f"✅ {plan['name']} активирована до {datetime.fromtimestamp(paid_until).strftime('%d.%m.%Y')}")
+        ref_info = get_user_referral_info(chat_id)
+        if ref_info.get("referred_by"):
+            bonus = plan["price"] * 0.2
+            add_referral_earnings(ref_info["referred_by"], bonus)
+            send_message(ref_info["referred_by"], f"🎉 Реферал оформил подписку! +${bonus:.2f}")
+        return True
+    return False
+
+def show_referral_menu(chat_id):
+    ref_info = get_user_referral_info(chat_id)
+    link = generate_referral_link(chat_id)
+    text = f"🎁 РЕФЕРАЛЫ\n\n🔗 {link}\n\n👥 Приглашено: {len(ref_info.get('referrals', []))}\n💰 Заработано: ${ref_info.get('earnings', 0):.2f}\n\n💎 Вы получаете 20% от платежей!"
+    keyboard = {"inline_keyboard": [[{"text": "📋 СКОПИРОВАТЬ", "callback_data": "copy_link"}], [{"text": "🔙 НАЗАД", "callback_data": "back"}]]}
+    send_message(chat_id, text, json.dumps(keyboard))
+
 def show_admin_panel(chat_id):
     keyboard = {"inline_keyboard": [[{"text":"📊 СТАТИСТИКА","callback_data":"admin_stats"}],[{"text":"👥 ПОЛЬЗОВАТЕЛИ","callback_data":"admin_users"}],[{"text":"📋 ПЛАТЕЖИ","callback_data":"admin_payments"}],[{"text":"🔙 НАЗАД","callback_data":"back"}]]}
     send_message(chat_id, "👑 АДМИН-ПАНЕЛЬ", json.dumps(keyboard))
 
 def run_bot():
     global last_update_id
-    logger.info("🤖 Telegram бот запущен")
-    
     while True:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
             resp = requests.get(url, params={"offset": last_update_id + 1, "timeout": 30})
             data = resp.json()
-            
             if not data.get("ok"):
                 continue
-                
             for update in data.get("result", []):
                 last_update_id = update["update_id"] + 1
-                
-                # Обработка сообщений
                 msg = update.get("message")
                 if msg:
                     chat_id = msg["chat"]["id"]
                     is_admin = (chat_id == ADMIN_ID)
                     text = msg.get("text", "")
-                    
                     if chat_id not in USERS:
                         USERS[chat_id] = {"active": False, "amount": 100, "min_spread": 0.3, "last_alerts": {}}
                         save_user_to_db(chat_id)
-                    
                     if text == "/start":
                         if "ref_" in text:
                             try:
                                 referrer_id = int(text.split("ref_")[1])
                                 if referrer_id != chat_id:
                                     add_referral(chat_id, referrer_id)
-                                    send_message(chat_id, "🎉 Вы зарегистрировались по реферальной ссылке!")
-                                    send_message(referrer_id, "🎉 По вашей ссылке зарегистрировался новый пользователь!")
+                                    send_message(chat_id, "🎉 Вы по реферальной ссылке!")
+                                    send_message(referrer_id, "🎉 Новый реферал!")
                             except: pass
                         show_main_menu(chat_id, is_admin)
-                    
                     elif text.startswith("/confirm"):
                         parts = text.split()
                         if len(parts) >= 3:
-                            plan_id = parts[1]
-                            txid = parts[2]
-                            if confirm_payment(chat_id, plan_id, txid):
-                                send_message(chat_id, "✅ Подписка активирована!")
-                            else:
-                                send_message(chat_id, "❌ Ошибка активации")
-                        else:
-                            send_message(chat_id, "Использование: /confirm plan_id TXID")
-                
-                # Обработка callback-запросов
+                            confirm_payment(chat_id, parts[1], parts[2])
                 callback = update.get("callback_query")
                 if callback:
                     chat_id = callback["message"]["chat"]["id"]
-                    message_id = callback["message"]["message_id"]
                     data_cb = callback["data"]
                     is_admin = (chat_id == ADMIN_ID)
-                    
                     if chat_id not in USERS:
                         USERS[chat_id] = {"active": False, "amount": 100, "min_spread": 0.3, "last_alerts": {}}
-                        save_user_to_db(chat_id)
-                    
                     user = USERS[chat_id]
-                    
-                    # ОТВЕЧАЕМ НА CALLBACK (убираем задержку)
                     try:
-                        requests.post(
-                            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
-                            json={"callback_query_id": callback["id"]},
-                            timeout=3
-                        )
-                    except:
-                        pass
-                    
-                    # Обработка кнопок
+                        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery", json={"callback_query_id": callback["id"]})
+                    except: pass
                     if data_cb == "start":
                         if check_subscription(chat_id):
                             user["active"] = True
@@ -734,12 +643,10 @@ def run_bot():
                         else:
                             send_message(chat_id, "❌ Оформите подписку!")
                         show_main_menu(chat_id, is_admin)
-                    
                     elif data_cb == "stop":
                         user["active"] = False
                         send_message(chat_id, "⏹️ Уведомления ВЫКЛЮЧЕНЫ!")
                         show_main_menu(chat_id, is_admin)
-                    
                     elif data_cb == "show_all":
                         if not check_subscription(chat_id) and not is_admin:
                             send_message(chat_id, "❌ Оформите подписку!")
@@ -747,8 +654,7 @@ def run_bot():
                             continue
                         send_message(chat_id, "🔍 ИЩУ СПРЕДЫ...")
                         if last_prices:
-                            favorites = get_user_favorites(chat_id)
-                            opps = analyze_all_opportunities(last_prices, {**user, "favorites": favorites})
+                            opps = analyze_all_opportunities(last_prices, {**user, "favorites": get_user_favorites(chat_id)})
                             if opps:
                                 for opp in opps[:10]:
                                     send_message(chat_id, format_opportunity_message(opp))
@@ -758,74 +664,55 @@ def run_bot():
                         else:
                             send_message(chat_id, "🔄 Данные загружаются...")
                         show_main_menu(chat_id, is_admin)
-                    
                     elif data_cb == "favorites_menu":
                         show_favorites_menu(chat_id)
-                    
                     elif data_cb.startswith("fav_"):
                         coin = data_cb.replace("fav_", "")
-                        favorites = get_user_favorites(chat_id)
-                        if coin in favorites:
-                            favorites.remove(coin)
-                            send_message(chat_id, f"❌ {coin} удалён")
+                        favs = get_user_favorites(chat_id)
+                        if coin in favs:
+                            favs.remove(coin)
                         else:
-                            favorites.append(coin)
-                            send_message(chat_id, f"✅ {coin} добавлен")
-                        update_user_favorites(chat_id, favorites)
+                            favs.append(coin)
+                        update_user_favorites(chat_id, favs)
                         show_favorites_menu(chat_id)
-                    
                     elif data_cb == "change_amount":
                         show_amount_keyboard(chat_id)
-                    
                     elif data_cb.startswith("amt_"):
                         user["amount"] = int(data_cb.replace("amt_", ""))
                         send_message(chat_id, f"✅ Сумма: ${user['amount']}")
                         show_main_menu(chat_id, is_admin)
-                    
                     elif data_cb == "change_spread":
                         show_spread_keyboard(chat_id)
-                    
                     elif data_cb.startswith("spread_"):
                         user["min_spread"] = float(data_cb.replace("spread_", "")) / 100
                         send_message(chat_id, f"✅ Min спред: {user['min_spread']}%")
                         show_main_menu(chat_id, is_admin)
-                    
                     elif data_cb == "top_spreads":
                         if not check_subscription(chat_id) and not is_admin:
                             send_message(chat_id, "❌ Оформите подписку!")
                             show_main_menu(chat_id, is_admin)
                             continue
-                        send_message(chat_id, "🏆 ПОЛУЧАЮ ТОП-10...")
                         if last_prices:
-                            favorites = get_user_favorites(chat_id)
-                            opps = analyze_all_opportunities(last_prices, {**user, "favorites": favorites})
+                            opps = analyze_all_opportunities(last_prices, {**user, "favorites": get_user_favorites(chat_id)})
                             if opps:
-                                text = "🏆 ТОП-10 СПРЕДОВ\n\n"
+                                text = "🏆 ТОП-10\n\n"
                                 for i, o in enumerate(opps[:10], 1):
                                     text += f"{i}. {o['coin']} | {o['buy_exchange']}→{o['sell_exchange']} | {o['spread']}% | +${o['best_profit']}\n"
                                 send_message(chat_id, text)
                             else:
                                 send_message(chat_id, "😴 Спредов нет")
-                        else:
-                            send_message(chat_id, "🔄 Данные загружаются...")
                         show_main_menu(chat_id, is_admin)
-                    
                     elif data_cb == "chart":
                         if not check_subscription(chat_id) and not is_admin:
                             send_message(chat_id, "❌ Оформите подписку!")
                             show_main_menu(chat_id, is_admin)
                             continue
-                        send_message(chat_id, "📊 Генерирую график...")
-                        chart_buf = generate_spread_chart()
-                        if chart_buf:
-                            url_photo = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-                            files = {'photo': ('chart.png', chart_buf)}
-                            data_photo = {'chat_id': chat_id, 'caption': '📈 График спредов'}
-                            requests.post(url_photo, files=files, data=data_photo)
+                        buf = generate_spread_chart()
+                        if buf:
+                            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", files={'photo': ('chart.png', buf)}, data={'chat_id': chat_id, 'caption': '📈 График спредов'})
                         else:
                             send_message(chat_id, "📊 Недостаточно данных")
                         show_main_menu(chat_id, is_admin)
-                    
                     elif data_cb == "history":
                         if not check_subscription(chat_id) and not is_admin:
                             send_message(chat_id, "❌ Оформите подписку!")
@@ -833,38 +720,26 @@ def run_bot():
                             continue
                         show_history(chat_id)
                         show_main_menu(chat_id, is_admin)
-                    
                     elif data_cb == "referral_menu":
                         show_referral_menu(chat_id)
-                    
-                    elif data_cb == "referral_stats":
-                        show_referral_stats(chat_id)
-                    
                     elif data_cb == "copy_link":
-                        link = generate_referral_link(chat_id)
-                        send_message(chat_id, f"🔗 Ваша ссылка:\n<code>{link}</code>")
+                        send_message(chat_id, f"🔗 {generate_referral_link(chat_id)}")
                         show_referral_menu(chat_id)
-                    
                     elif data_cb == "subscription_menu":
                         show_subscription_menu(chat_id)
-                    
                     elif data_cb.startswith("plan_"):
-                        plan_id = data_cb.replace("plan_", "")
-                        show_confirm_payment(chat_id, plan_id)
-                    
+                        show_confirm_payment(chat_id, data_cb.replace("plan_", ""))
                     elif data_cb == "status":
                         if not check_subscription(chat_id) and not is_admin:
                             send_message(chat_id, "❌ Оформите подписку!")
                             show_main_menu(chat_id, is_admin)
                             continue
-                        favorites = get_user_favorites(chat_id)
-                        text = f"📊 СТАТУС\n\nАктивен: {'✅' if user['active'] else '⏹️'}\nСумма: ${user['amount']}\nMin спред: {user['min_spread']}%\nМонет: {len(TOP_COINS)}\nБирж: {len(EXCHANGES)}\n⭐ Избранное: {', '.join(favorites[:5]) if favorites else 'нет'}"
+                        favs = get_user_favorites(chat_id)
+                        text = f"📊 СТАТУС\n\nАктивен: {'✅' if user['active'] else '⏹️'}\nСумма: ${user['amount']}\nMin спред: {user['min_spread']}%\nМонет: {len(TOP_COINS)}\nБирж: {len(EXCHANGES)}\n⭐ Избранное: {', '.join(favs[:5]) or 'нет'}"
                         send_message(chat_id, text)
                         show_main_menu(chat_id, is_admin)
-                    
                     elif data_cb == "admin_panel" and is_admin:
                         show_admin_panel(chat_id)
-                    
                     elif data_cb == "admin_stats" and is_admin:
                         active = sum(1 for u in USERS.values() if u.get("active"))
                         sub_count = 0
@@ -875,19 +750,16 @@ def run_bot():
                             sub_count = c.fetchone()[0]
                             conn.close()
                         except: pass
-                        text = f"📊 СТАТИСТИКА\n\n👥 Пользователей: {len(USERS)}\n🟢 Активных: {active}\n💎 Подписок: {sub_count}\n🪙 Монет: {len(TOP_COINS)}\n🏦 Бирж: {len(EXCHANGES)}"
-                        send_message(chat_id, text)
+                        send_message(chat_id, f"📊 СТАТИСТИКА\n\n👥 Пользователей: {len(USERS)}\n🟢 Активных: {active}\n💎 Подписок: {sub_count}\n🪙 Монет: {len(TOP_COINS)}\n🏦 Бирж: {len(EXCHANGES)}")
                         show_admin_panel(chat_id)
-                    
                     elif data_cb == "admin_users" and is_admin:
                         text = "👥 ПОЛЬЗОВАТЕЛИ\n\n"
                         for uid, u in list(USERS.items())[:20]:
                             sub = get_user_subscription(uid)
-                            sub_status = "💎" if sub and sub[1] > time.time() else "❌"
+                            sub_status = "💎" if sub and sub["paid_until"] > time.time() else "❌"
                             text += f"• {uid}: {sub_status} {'✅' if u.get('active') else '⏹️'}\n"
                         send_message(chat_id, text)
                         show_admin_panel(chat_id)
-                    
                     elif data_cb == "admin_payments" and is_admin:
                         try:
                             conn = sqlite3.connect(DB_FILE)
@@ -897,36 +769,16 @@ def run_bot():
                             conn.close()
                             text = "📋 ПОСЛЕДНИЕ ПЛАТЕЖИ\n\n"
                             for p in payments:
-                                date = datetime.fromtimestamp(p[3]).strftime('%d.%m.%Y')
-                                text += f"• {p[0]} | {p[1]} | ${p[2]} | {date}\n"
+                                text += f"• {p[0]} | {p[1]} | ${p[2]} | {datetime.fromtimestamp(p[3]).strftime('%d.%m')}\n"
                             send_message(chat_id, text)
                         except: pass
                         show_admin_panel(chat_id)
-                    
                     elif data_cb == "help":
-                        text = """ℹ️ <b>ПОМОЩЬ</b>
-
-🚀 ЗАПУСТИТЬ — автоуведомления
-🔍 ПОКАЗАТЬ СПРЕДЫ — ручной поиск
-⭐ ИЗБРАННЫЕ — выбрать монеты
-💰 СУММА — от $10
-🎯 MIN СПРЕД — порог
-🏆 ТОП-10 — лучшие спреды
-📈 ГРАФИК — визуализация
-📜 ИСТОРИЯ — все спреды
-🎁 РЕФЕРАЛЫ — 20% с платежей
-💎 ПОДПИСКА — $5/неделя, $20/месяц, $50/3мес, $100/год, $350/бессрочно
-
-👑 Администратор имеет полный доступ"""
-                        send_message(chat_id, text)
+                        send_message(chat_id, "ℹ️ ПОМОЩЬ\n\n🚀 ЗАПУСТИТЬ — автоуведомления\n🔍 ПОКАЗАТЬ СПРЕДЫ — ручной поиск\n⭐ ИЗБРАННЫЕ — выбор монет\n💰 СУММА — от $10\n🎯 MIN СПРЕД — порог\n🏆 ТОП-10 — лучшие\n📈 ГРАФИК — визуализация\n📜 ИСТОРИЯ — все спреды\n🎁 РЕФЕРАЛЫ — 20%\n💎 ПОДПИСКА — тарифы")
                         show_main_menu(chat_id, is_admin)
-                    
                     elif data_cb == "back":
                         show_main_menu(chat_id, is_admin)
-                    
-                    # Небольшая пауза между отправками
-                    time.sleep(0.1)
-                    
+                    time.sleep(0.05)
         except Exception as e:
             logger.error(f"Ошибка: {e}")
             time.sleep(1)
@@ -942,8 +794,7 @@ async def main_scanner():
             last_prices = prices
             for chat_id, user in USERS.items():
                 if user.get("active") and check_subscription(chat_id):
-                    favorites = get_user_favorites(chat_id)
-                    opps = analyze_all_opportunities(prices, {**user, "favorites": favorites})
+                    opps = analyze_all_opportunities(prices, {**user, "favorites": get_user_favorites(chat_id)})
                     for opp in opps[:3]:
                         key = f"{opp['coin']}_{opp['buy_exchange']}_{opp['sell_exchange']}"
                         now = time.time()
@@ -960,13 +811,14 @@ async def main_scanner():
 async def main():
     init_db()
     await init_exchanges()
+    asyncio.create_task(start_websockets())
     threading.Thread(target=run_web, daemon=True).start()
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=run_bot, daemon=True).start()
     logger.info("="*50)
-    logger.info("🚀 АРБИТРАЖНЫЙ СКАНЕР ЗАПУЩЕН")
+    logger.info("🚀 АРБИТРАЖНЫЙ СКАНЕР С WEBSOCKET")
     logger.info(f"🏦 Бирж: {len(EXCHANGES)}")
-    logger.info(f"👑 АДМИН: {ADMIN_ID} (полный доступ без подписки)")
+    logger.info("⚡ WebSocket: Binance (реальное время)")
     logger.info("="*50)
     await main_scanner()
 
